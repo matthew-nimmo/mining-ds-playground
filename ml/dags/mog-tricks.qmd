@@ -1,0 +1,150 @@
+# Mixture of Gaussian Bayesian Network trick
+
+Non-linear relationships and non-Gaussian distributions can be handled in a mixture of Gaussian Bayesian Network.
+
+```{r}
+#| output: false
+library(bnlearn)
+library(simDAG)
+```
+
+## Uniform distribution
+
+```{r}
+#| label: fig-ud1
+#| fig-cap: "Approximating a Uniform distribution (bnlearn)"
+#| fig.width: 4
+#| fig.height: 4
+
+set.seed(1781)
+
+# Generate data
+k <- 6
+n_samples <- 1000
+x <- runif(n_samples)
+s <- cut(x, breaks=0:k/k)
+z <- data.frame(X=x, S=s)
+
+# Fit Bayesian Network
+dag <- "[S][X|S]"
+dag <- model2network(dag)
+bn <- bn.fit(dag, z, replace.unidentifiable=TRUE)
+
+# --- Plot ---
+zz <- rbn(bn, n_samples)$X
+plot(ecdf(z$X), lwd=2, main="ecdf", do.points=FALSE)
+plot(ecdf(zz), col="red", lwd=2, do.points=FALSE, add=TRUE)
+```
+
+To replicate the Bayesian Network using simDAG we need to add the independent Gaussian random variable $Z$. This variable is a parent to $X$. Making the DAG $S \rightarrow X \leftarrow Z$.
+
+```{r}
+offsets <- as.numeric(coef(bn$X)) |>
+  (\(x) {names(x) <- 1:length(x); x})()
+sigma <- as.numeric(sigma(bn$X)) |>
+  (\(x) {names(x) <- 1:length(x); x})()
+node_x <- function(data, parents, betas=NULL) {
+  return(offsets[data$S] + sigma[data$S]*data$Z)
+}
+
+dag_replicated <- empty_dag() +
+  node("S", type="rcategorical", probs=coef(bn$S),
+       output="factor", labels=1:length(coef(bn$S))) +
+  node("Z", type="rnorm", mean=0, sd=1) +
+  node("X", type=node_x, parents=c("S","Z"))
+
+# Simulate the Naive Measured Dataset
+set.seed(1781)
+n_samples <- 1000
+df_replicated <- sim_from_dag(dag_replicated, n_sim=n_samples) |> 
+  as.data.frame()
+```
+
+```{r}
+#| label: fig-ud2
+#| fig-cap: "Approximating a Uniform distribution (simDAG)"
+#| fig.width: 4
+#| fig.height: 4
+
+set.seed(1781)
+
+# Generate data
+k <- 6
+n_samples <- 1000
+x <- runif(n_samples)
+s <- cut(x, breaks=0:k/k)
+z <- data.frame(X=x, S=s)
+
+# --- Plot ---
+plot(ecdf(df_replicated$X), lwd=2, main="ecdf", do.points=FALSE)
+plot(ecdf(zz), col="red", lwd=2, do.points=FALSE, add=TRUE)
+```
+
+## Sigmoid function
+
+```{r}
+#| label: fig-sf1
+#| fig-cap: "Approximating a Sigmoid Function (bnlearn)"
+#| fig.width: 4
+#| fig.height: 4
+
+sigmoid <- function(x, alpha=1) {
+  y <- 1 / (1 + exp(-alpha * x))
+  return(y)
+}
+
+# Generate data
+n_samples <- 1000
+set.seed(1781)
+x <- seq(from=-5, to=5, by=0.1)
+y <- sigmoid(x)
+z <- data.frame(X=c(-10, x, 10), Y=c(0, y, 1))
+
+dag <- "[S][R|S][X|S:R][Y|X:S]"
+dag <- model2network(dag)
+
+# Fit Bayesian Network
+zz <- z
+zz$S <- cut(zz$X, breaks=10)
+zz$R <- cut(zz$Y, breaks=10)
+bn <- bn.fit(dag, zz, replace.unidentifiable=TRUE)
+
+# --- Plot ---
+x <- z
+x$Y <- as.numeric(NA)
+x$S <- cut(x$X, breaks=nlevels(zz$S))
+x$R <- factor(NA, levels=levels(zz$R))
+y <- suppressWarnings(impute(bn, x))
+
+plot(z$X, z$Y, lwd=2, type="l", main="Sigmoid Function",
+     xlab="X", ylab="Y = sigmoid(X)")
+lines(y$X, y$Y, type="l", col="red", lwd=2)
+```
+
+## Reversing an edge
+
+```{r}
+#| label: fig-re1
+#| fig-cap: "Reversing an edge"
+#| fig.width: 4
+#| fig.height: 4
+
+set.seed(1781)
+
+# Generate data
+k <- 11
+n_samples <- 2000
+A <- rnorm(n_samples)
+B <- as.factor(ifelse(A>0.0, "b", "nb"))
+s <- cut(A, breaks=k)
+z <- data.frame(A=A, B=B, S=s)
+
+# Fit Bayesian Network
+dag <- "[B][S|B][A|B:S]"
+dag <- model2network(dag)
+bn <- bn.fit(dag, z, replace.unidentifiable=TRUE)
+
+# --- Plot ---
+y <- suppressWarnings(bnlearn::rbn(bn, n_samples))
+qqnorm(y$A, main="Q-Q Plot", pch=19, cex=0.6, ylab="Sample Quantiles (A)")
+```

@@ -1,0 +1,72 @@
+# Survivorship Bias
+
+Survivorship bias is a form of selection bias where a dataset has already been filtered by a selection process (survival or success). It occurs when the failures (non-survivors) are excluded from the data and ignored. It creates a dangerously skewed perception of reality and leads to overestimate the odds of success.
+
+```{r}
+#| label: fig-sb1
+#| fig-cap: "Survivorship Bias"
+#| fig.width: 8
+#| fig.height: 4
+
+set.seed(123)
+
+n_planes <- 1000
+
+# Generate Independent Hits (Fuselage and Engine are completely uncorrelated)
+fuselage_hits <- rtruncnorm(n_planes, mean=5, sd=1.5, a=0)
+engine_hits <- rtruncnorm(n_planes, mean=5, sd=1.5, a=0)
+
+# Define Survival (S)
+# The engine is critical; if engine hits are high, the plane crashes.
+# The fuselage is sturdy; fuselage hits barely affect survival.
+survival_threshold <- 7.5
+survived <- ifelse(engine_hits + (0.5 * fuselage_hits) < survival_threshold, "Returned to Base", "Shot Down")
+
+plane_data <- data.frame(
+  Fuselage_Hits=fuselage_hits,
+  Engine_Hits=engine_hits,
+  Status=as.factor(survived)
+)
+
+# --- Plots ---
+# Left: The DAG (S acts as a collider)
+coords <- list(
+  x = c(X=1, Y=3, S=2),
+  y = c(X=2, Y=2, S=1)
+)
+
+dag_surv <- dagify(
+  S ~ X, 
+  S ~ Y, 
+  exposure="X", 
+  outcome="Y",
+  coords=coords
+) |> 
+  tidy_dagitty() |> 
+  ggdag(node_size=12) + 
+  theme_dag() + 
+  scale_x_continuous(expand = expansion(mult = 0.2)) +
+  labs(
+    title="Survivorship Bias DAG", 
+    subtitle="X = Fuselage Hits\nY = Engine Hits\nS = Survival (Collider)"
+  )
+
+# Right: The Scatter Plot
+plot_surv <- ggplot(plane_data, aes(x=Fuselage_Hits, y=Engine_Hits)) +
+  geom_point(aes(color=Status), alpha=0.5) +
+  scale_color_manual(values=c("Shot Down" = "grey75", "Returned to Base"="firebrick")) +
+  geom_smooth(method="lm", se=FALSE, color="black", linetype="dashed", size=1.2) +
+  geom_smooth(data=filter(plane_data, Status == "Returned to Base"), 
+              method="lm", se=FALSE, color="firebrick", size=1.2) +
+  theme_minimal() +
+  labs(
+    title="WWII Armor: Damage Distribution",
+    subtitle="Dashed line = All Planes (Unbiased)\nRed line = Survivors (Biased Sample)",
+    x="Fuselage Hits (Sturdy)",
+    y="Engine Hits (Critical)",
+    color="Plane Status"
+  )
+
+# Display side-by-side
+dag_surv + plot_surv + plot_layout(widths=c(7, 8))
+```

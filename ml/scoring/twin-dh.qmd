@@ -1,0 +1,324 @@
+# Scoring
+
+Basic example.
+
+## Case study: validating twin drill holes
+
+### 1. Generating synthetic twin holes
+
+We will generate a primary hole (`DH001`) and its twin (`DH001_TWIN`). They share identical lithology but have simulated variance in their copper ($Cu\%$), iron ($Fe\%$), and sulphur ($S\%$) assays.
+
+```{r}
+#| label: twin-data
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+
+set.seed(11) # For repeatability
+
+# Define intervals
+depth_from <- seq(0, 100, by=10)
+depth_to   <- seq(10, 110, by=10)
+lithology  <- c("AAC", "AAC", "CC", "XNL", "XNL", "XNL", "XNL",
+                "XRT", "SAM", "SAM", "SAM")
+
+# True underlying grade trend
+true_cu <- c(0.1, 0.2, 0.8, 1.2, 1.5, 1.1, 0.97, 0.4, 0.2, 0.1, 0.05)
+true_fe <- c(6.5, 3.4, 17.5, 21.7, 23.5, 20.9, 18.9, 13.9, 1.3, 2.2, 1.8)
+true_s <- c(1.3, 0.8, 12.3, 11.8, 17.1, 16.4, 17.2, 12.5, 0.8, 1.1, 0.5)
+
+# Generate Primary Hole
+dh_primary <- tibble(
+  hole_id = "DH001",
+  from = depth_from,
+  to = depth_to,
+  mid = (from + to) / 2,
+  lith = lithology,
+  cu_pct = pmax(0.01, true_cu + rnorm(11, mean=0, sd=0.08)),
+  fe_pct = pmax(0.01, true_fe + rnorm(11, mean=0, sd=1.18)),
+  s_pct = pmax(0.01, true_s + rnorm(11, mean=0, sd=3.22))
+)
+
+# Generate Twin Hole (with simulated assay/geological variance)
+dh_twin <- tibble(
+  hole_id = "DH001_TWIN",
+  from = depth_from,
+  to = depth_to,
+  mid = (from + to) / 2,
+  lith = lithology,
+  cu_pct = pmax(0.01, true_cu + rnorm(11, mean=0, sd=0.24)), # Higher variance
+  fe_pct = pmax(0.01, true_fe + rnorm(11, mean=4.7, sd=1.18)), # Mean bias
+  s_pct = pmax(0.01, true_s + rnorm(11, mean=-10.3, sd=6.22)) # Higher variance -Mean bias
+)
+
+# Combine datasets
+twin_pairs <- bind_rows(dh_primary, dh_twin)
+twin_df <- dh_primary |>
+  select(hole_id, from, to, mid, lith, cu_primary=cu_pct, fe_primary=fe_pct, s_primary=s_pct) |>
+  inner_join(
+    select(dh_twin, from, to, cu_twin=cu_pct, fe_twin=fe_pct, s_twin=s_pct), 
+    by = c("from", "to")
+  )
+```
+
+```{r}
+head(twin_pairs, 11)
+```
+
+### 2. Traditional visual comparison
+
+Before scoring, let's look at the data using the traditional approach of plotting the drill hole logs and geochemistry traces side-by-side and plotting the paired data points as scatter plots.
+
+```{r}
+#| label: twin-plot
+#| fig-width: 10
+#| fig-height: 5
+
+p1 <- ggplot(twin_pairs, aes(x=hole_id, y=mid, fill=lith)) +
+  geom_tile(width = 0.5, stat = "identity") +
+  scale_y_reverse() +
+  labs(title="Lithology Comparison", x="", y="Depth (m)", fill="Lith") +
+  theme_minimal()
+
+p2 <- ggplot(twin_pairs, aes(x=mid, y=cu_pct, color=hole_id)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title="Assay Profile (Cu %)", x="Depth (m)", y="Cu (%)", color="Hole ID") +
+  theme_minimal() +
+  theme(legend.position="none")
+
+p3 <- ggplot(twin_pairs, aes(x=mid, y=fe_pct, color=hole_id)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title="Assay Profile (Fe %)", x="Depth (m)", y="Fe (%)", color="Hole ID") +
+  theme_minimal() +
+  theme(legend.position="none")
+
+p4 <- ggplot(twin_pairs, aes(x=mid, y=s_pct, color=hole_id)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title="Assay Profile (S %)", x="Depth (m)", y="S (%)", color="Hole ID") +
+  theme_minimal()
+
+p1 + p2 + p3 + p4 + plot_layout(ncol=4)
+```
+
+```{r}
+#| label: twin-scatter
+#| fig-width: 10
+#| fig-height: 4
+
+p1 <- ggplot(twin_df, aes(x=cu_primary, y=cu_twin)) +
+  geom_point(size = 1) +
+  geom_abline(intercept=0, slope=1, color="red") +
+  coord_fixed(ratio=1) +
+  labs(title="Twin drillhole comparisons", x="Cu (%)", y="Twin Cu (%)") +
+  theme_minimal() +
+  theme()
+
+p2 <- ggplot(twin_df, aes(x=fe_primary, y=fe_twin)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, color="red") +
+  coord_fixed(ratio=1) +
+  labs(x="DH001 Fe (%)", y="DH001_Twin Fe (%)") +
+  theme_minimal() +
+  theme()
+
+p3 <- ggplot(twin_df, aes(x=s_primary, y=s_twin)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, color="red") +
+  coord_fixed(ratio=1) +
+  labs(x="DH001 S (%)", y="DH001_Twin S (%)") +
+  theme_minimal()
+
+p1 + p2 + p3 + plot_layout(ncol=3, widths=c(1,1,1))
+```
+
+### 3. Applying the scoring function
+
+Rule:
+
+If the relative difference between the original drill hole assay and its twin is less than or equal to a threshold value the indicator value is (0). Otherwise, it is (1). An indicator value of (1) is a rule violation and suggests that there is likely a problem with the cell value.
+
+Score:
+
+The score for an individual cell is normalized between 0 and 1, where 1 indicates perfect quality and 0 indicates maximum failure. If an interval passes the rule (indicator is 0), its cell score is 1. If an interval violates the rule (indicator is 1), it receives a penalty based on the rule's prevalence (the failure rate of that variable across the dataset). The penalized score is calculated as $1−prevalence$. The final score for a specific element (column, row, or the whole project) is the average of these cell scores, easily translatable into a 0% to 100% KPI.
+
+```{r}
+#| label: twin-logic
+
+n <- nrow(twin_df)
+
+# Define the scoring function parameters
+THRESHOLD <- 0.5 # 50% relative difference
+DAMPING <- 0.1
+
+# We could calculate the DAMPING value from the data using lower 10th percentile
+c_cu <- quantile(twin_df$cu_primary, probs=0.1)
+c_fe <- quantile(twin_df$fe_primary, probs=0.1)
+c_s <- quantile(twin_df$s_primary, probs=0.1)
+
+# Calculate indicator = there is a problem
+rule_df <- twin_df |>
+  mutate(
+    cu_diff = abs(cu_primary-cu_twin) / (pmax(cu_primary,cu_twin)+DAMPING),
+    fe_diff = abs(fe_primary-fe_twin) / (pmax(fe_primary,fe_twin)+DAMPING),
+    s_diff = abs(s_primary-s_twin) / (pmax(s_primary,s_twin)+DAMPING),
+    # The scoring function logic (Indicator Variable)
+    cu_indicator = if_else(cu_diff <= THRESHOLD, 0, 1),
+    fe_indicator = if_else(fe_diff <= THRESHOLD, 0, 1),
+    s_indicator = if_else(s_diff <= THRESHOLD, 0, 1)
+  )
+
+# Calculate prevalence
+# Confidence = (1 - prevalence)
+prev_df <- rule_df |>
+  summarise(
+    cu_prev = sum(cu_indicator) / n,
+    fe_prev = sum(fe_indicator) / n,
+    s_prev = sum(s_indicator) / n
+  )
+
+# Calculate cell score
+scored_df <- rule_df |>
+  mutate(
+    cu_score = if_else(cu_indicator == 1, 1 - prev_df$cu_prev, 1), # Probability that there is no problem
+    fe_score = if_else(fe_indicator == 1, 1 - prev_df$fe_prev, 1),
+    s_score = if_else(s_indicator == 1, 1 - prev_df$s_prev, 1)
+  ) |>
+  mutate(
+    score = (cu_score + fe_score + s_score) / 3
+  )
+
+# Calculate the final project/pair score
+final_cu_score <- mean(scored_df$cu_score)
+final_fe_score <- mean(scored_df$fe_score)
+final_s_score <- mean(scored_df$s_score)
+final_score <- (final_cu_score + final_fe_score + final_s_score) / 3
+
+knitr::kable(scored_df[c("from","to","cu_score","fe_score","s_score","score")])
+```
+
+Final Twin Validation Score: `r scales::percent(final_score)` of intervals met the acceptable variance threshold.
+
+```{r}
+#| label: twin-score
+#| fig-width: 10
+#| fig-height: 5
+
+p1 <- ggplot(twin_pairs, aes(x=mid, y=cu_pct, color=hole_id)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title=paste("Score =", signif(final_cu_score,3)*100, "%"), x="Depth (m)", y="Cu (%)", color="Hole ID") +
+  theme_minimal() +
+  theme(legend.position="none")
+
+p2 <- ggplot(twin_pairs, aes(x=mid, y=fe_pct, color=hole_id)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title=paste("Score =", signif(final_fe_score,3)*100, "%"), x="Depth (m)", y="Fe (%)", color="Hole ID") +
+  theme_minimal() +
+  theme(legend.position="none")
+
+p3 <- ggplot(twin_pairs, aes(x=mid, y=s_pct, color=hole_id)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title=paste("Score =", signif(final_s_score,3)*100, "%"), x="Depth (m)", y="S (%)", color="Hole ID") +
+  theme_minimal()
+
+p4 <- ggplot(scored_df, aes(x=mid, y=score)) +
+  geom_line(size = 1) +
+  geom_point() +
+  coord_flip() +
+  scale_x_reverse() +
+  labs(title=paste("Score =", signif(final_score,3)*100, "%"), x="Depth (m)", y="Score") +
+  theme_minimal() +
+  theme(legend.position="none")
+
+p1 + p2 + p3 + p4 + plot_layout(ncol=4)
+```
+
+```{r}
+#| label: twin-box
+#| fig-width: 10
+#| fig-height: 5
+
+p1 <- ggplot(scored_df, aes(x=lith, y=cu_score)) +
+  geom_boxplot(fill="lightgrey") +
+  labs(title=paste("Score =", signif(final_cu_score,3)*100, "%"), x="Depth (m)", y="Cu Score") +
+  theme_minimal()
+
+p2 <- ggplot(scored_df, aes(x=lith, y=fe_score)) +
+  geom_boxplot(fill="lightgrey") +
+  labs(title=paste("Score =", signif(final_fe_score,3)*100, "%"), x="Depth (m)", y="Fe Score") +
+  theme_minimal()
+
+p3 <- ggplot(scored_df, aes(x=lith, y=s_score)) +
+  geom_boxplot(fill="lightgrey") +
+  labs(title=paste("Score =", signif(final_s_score,3)*100, "%"), x="Depth (m)", y="S Score") +
+  theme_minimal()
+
+p1 + p2 + p3 + plot_layout(ncol=3)
+```
+
+## Putting it all together
+
+The scoring function.
+
+```{r}
+#| label: score
+
+score_twindh <- function(x, y) {
+  if(!is.numeric(x) || !is.numeric(y)) {
+    stop("data must be numeric")
+  }
+  if(length(x) != length(y)) {
+    stop("data must be the same length")
+  }
+  
+  # Define the scoring function parameters
+  THRESHOLD <- 0.5 # 50% relative difference
+  DAMPING <- 0.1
+  
+  n <- length(x)
+  p10 <- quantile(x, probs=0.1) # Get the 10th percentile of the first vector
+  damp <- max(DAMPING, p10)
+  
+  # Calculate inverse score
+  # Rule 1
+  diff <- abs(x-y) / (pmax(x,y)+damp)
+  ind <- ifelse(diff <= THRESHOLD, 0, 1) # Calculate indicator
+  prev <- sum(ind) / n # Calculate prevalence
+  iscore <- ind * prev # Calculate inverse score
+  
+  # Calculate other rules here
+  # Replicate Rule 1 pattern
+  # Combine cell rules by taking the product of all iscore values
+  
+  # Calculate score
+  score <- 1 - iscore # Return this if interested in cell scores
+  mean(score)
+}
+```
+
+To use the function:
+
+```{r}
+cu_score <- score_twindh(twin_df$cu_primary, twin_df$cu_twin)
+fe_score <- score_twindh(twin_df$fe_primary, twin_df$fe_twin)
+s_score <- score_twindh(twin_df$s_primary, twin_df$s_twin)
+
+signif((cu_score + fe_score + s_score) / 3, 3) * 100
+```

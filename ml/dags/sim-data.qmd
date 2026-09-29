@@ -1,0 +1,222 @@
+# Simulating data from a DAG
+
+Simulating synthetic data directly from a Directed Acyclic Graph (DAG) allows us to create controlled testing environments. By explicitly defining structural equations, we can model how variables interact.
+
+```{r}
+#| output: false
+library(simDAG)
+library(bnlearn)
+library(SEMgraph)
+library(ggplot2)
+library(ggdag)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+library(broom)
+source("./r/rtruncnorm.R")
+source("./r/plot_dag.R")
+```
+
+## Truth dataset
+
+The truth DAG (@fig-dag) is used to define the structure while the parameters of the probabilistic graphical model are set arbitrarily.
+
+```{r}
+dag_truth <- empty_dag() +
+  node("C", type="rcategorical", probs=c(0.15, 0.47, 0.38),
+       output="factor", labels=c("a", "b", "c")) +
+  node("I", type="rnorm", mean=15.0, sd=1.5) +
+  node("J", type="rbernoulli", p=0.5, output="logical") +
+  node("L", type="rnorm", mean=-1.3, sd=5.5) +
+  node("E", type="gaussian",
+       formula= ~ 2.0 + I*1.5 + Cb*-1.1 + Cc*7,
+       error=0.7,
+       parents=c("I","C")) +
+  node("G", type="gaussian", error=4.5,
+       formula=~ 3.5 + Cb*5.2 + Cc*-11.1,
+       parents="C") +
+  node("S", type="identity",
+       formula=~ (E + L) < 20.7,
+       parents=c("E","L")) +
+  node("M", type="gaussian",
+       formula=~ 1.7 + E*3.44,
+       error=3.7,
+       parents="E") +
+  node("D", type="gaussian",
+       formula= ~ 0.1 + E*15.2 + M*-2.7 + L*4.3 + G*8.6 + JTRUE*-5.68,
+       error=3.1,
+       parents=c("E","M","L","G","J")) +
+  node("Z", type="identity",
+       formula=~ ifelse(D > 1.2, TRUE, FALSE),
+       parents="D")
+
+# Simulate the True Dataset
+set.seed(2131)
+n_samples <- 10000
+df_truth <- sim_from_dag(dag_truth, n_sim=n_samples) |> 
+  as.data.frame() |>
+  mutate(Source = "Truth")
+```
+
+The results of simulating data from @fig-dag is shown in @fig-dag1. The plot shows the data generating DAG on the left hand side and a scatter plot of $D$ on $E$ where data points are coloured by the confounder variable $C$.
+
+```{r}
+#| label: fig-dag1
+#| fig-cap: "Example simulating from a DAG using simDAG"
+#| fig.width: 8
+#| fig.height: 4
+
+x <- df_truth[order(df_truth$S), ]
+
+# --- Plots ---
+# Left: The DAG
+dag_a <- dagify(
+  E ~ I + C,
+  G ~ C,
+  S ~ E + L,
+  M ~ E,
+  D ~ E + M + L + G + J,
+  Z ~ D
+) |> 
+  tidy_dagitty(layout="stress") |>
+  ggplot(aes(x=x, y=y, xend=xend, yend=yend)) +
+    geom_dag_edges_link(aes(start_cap=ggraph::circle(5,"mm"),
+                            end_cap=ggraph::circle(5,"mm"))) +
+    geom_dag_point(size=9) +
+    geom_dag_text(size=4) +
+    theme_dag() +
+    labs(title="DAG")
+
+# Right: Scatter plot
+plot_a <- ggplot(x, aes(x=E, y=D)) +
+  geom_point(aes(color=C), alpha=0.5, size=0.5) +
+  geom_smooth(method="lm", se=FALSE, color="black", linetype="dashed", size=1.2) +
+  geom_smooth(aes(color=C), method="lm", se=FALSE, size=1) +
+  theme_minimal() +
+  labs(title="Scatter Plot: D ~ E",
+       subtitle="Dashed line = Aggregate\nColored lines = Stratified by C")
+
+# Display side-by-side
+dag_a + plot_a + plot_layout(widths=c(8, 6))
+```
+
+### The measured dataset
+
+The truth dataset (`df_truth`) is subset by filtering rows where the variable $S$ is true. Only the variables $E$, $D$, and $Z$ are selected. The $Z$ variable is converted from logical to a factor.
+
+```{r}
+df_measured <- df_truth[df_truth$S, c("E","D","Z")] |>
+  mutate(Z = as.factor(Z),
+         Source = "Truth")
+```
+
+### The replicated dataset
+
+```{r}
+# Learn the DAG and fit the Bayesian Network
+dag <- hc(df_measured[,-4])
+bn_model <- bn.fit(dag, df_measured[,-4])
+
+# Generate synthetic data
+set.seed(101)
+n_samples <- 2400
+df_replicated <- rbn(bn_model, n=n_samples) |> 
+  mutate(Source = "Synthetic")
+```
+
+Comparing the replicated dataset generated from the Bayesian Network against the true measured dataset shows very good agreement between the two datasets (@fig-res1).
+
+```{r}
+#| label: fig-res1
+#| fig-cap: "Comparison between measured data and synthetic data"
+#| fig.width: 6
+#| fig.height: 3
+
+# Select common continuous variables for comparison
+continuous_vars <- c("D", "E", "Z")
+
+combined_df <- bind_rows(
+  df_measured |> select(all_of(continuous_vars), Source) |> mutate(Z = as.numeric(Z)),
+  df_replicated |> select(all_of(continuous_vars), Source) |> mutate(Z = as.numeric(Z))
+) |>
+  pivot_longer(cols=all_of(continuous_vars), names_to="Variable", values_to="Value")
+
+# Plot using ggplot2
+ggplot(combined_df, aes(x=Value, color=Source)) +
+  stat_ecdf(geom="step", linewidth=1) +
+  facet_wrap(~ Variable, scales="free_x") +
+  scale_color_manual(values=c("darkorange", "royalblue")) +
+  labs(
+    title = "Empirical Cumulative Distribution Function (ECDF)",
+    subtitle = "Evaluating structural shifts introduced by missing features",
+    x="Measured Value",
+    y="Cumulative Probability (Fn(x))",
+    color="Dataset Version"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text=element_text(face="bold", size=11),
+    plot.title=element_text(face="bold", size=14)
+  )
+```
+
+```{r}
+#| label: fig-res2
+#| fig-cap: "Comparison between truth data and synthetic data"
+#| fig.width: 6
+#| fig.height: 3
+
+# Select common continuous variables for comparison
+continuous_vars <- c("D", "E", "Z")
+
+combined_df <- bind_rows(
+  df_truth |> select(all_of(continuous_vars), Source) |> mutate(Z = as.numeric(Z)),
+  df_replicated |> select(all_of(continuous_vars), Source) |> mutate(Z = as.numeric(Z))
+) |>
+  pivot_longer(cols=all_of(continuous_vars), names_to="Variable", values_to="Value")
+
+# Plot using ggplot2
+ggplot(combined_df, aes(x=Value, color=Source)) +
+  stat_ecdf(geom="step", linewidth=1) +
+  facet_wrap(~ Variable, scales="free_x") +
+  scale_color_manual(values=c("darkorange", "royalblue")) +
+  labs(
+    title = "Empirical Cumulative Distribution Function (ECDF)",
+    subtitle = "Evaluating structural shifts introduced by missing features",
+    x="True Value",
+    y="Cumulative Probability (Fn(x))",
+    color="Dataset Version"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text=element_text(face="bold", size=11),
+    plot.title=element_text(face="bold", size=14)
+  )
+```
+
+```{r}
+#| label: fig-compare-dags
+#| fig-cap: "Truth DAG"
+#| fig.width: 6
+#| fig.height: 4
+
+dag_true <- dagify(
+  E ~ I + C,
+  G ~ C,
+  S ~ E + L,
+  M ~ E,
+  D ~ E + M + L + G + J,
+  Z ~ D
+) |> plot_dag(layout="stress") +
+  labs(title="True DAG")
+
+dag_bn <- as.igraph(bn_model) |>
+  graph2dagitty() |>
+  plot_dag(layout="stress") +
+  labs(title="Bayesian Network DAG")
+
+# Display side-by-side
+dag_true + dag_bn
+```

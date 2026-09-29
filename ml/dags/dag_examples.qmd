@@ -1,0 +1,272 @@
+# Building a DAG
+
+```{r}
+#| output: false
+library(simDAG)
+library(tidyverse)
+library(dplyr)
+library(dagitty)
+library(tidyr)
+library(stringr)
+library(ggdag)
+library(ggplot2)
+
+source("./r/plot_dag.R")
+source("./r/rtruncnorm.R")
+```
+
+## Geology example
+
+In mineral resource estimation, the use of machine learning comes in handy when dealing with missing values or with dealing with highly under-sampled data such as the bulk density of rock samples. For bulk density a common approach is to simply use assays to predict density. Assays have molar mass which is directly correlated with bulk density ($assays \rightarrow bulk\ density$) of a rock sample.
+
+To simplify the visual presentation of the DAG, the DAG nodes will be abbreviated.
+
+DAG node abbreviations:
+
+- X = assays
+- Y = rock bulk density
+- L = lithology
+- M = mineral assemblage
+- R1 = porosity
+- R2 = moisture
+- R3 = texture
+- R4 = hardness
+- R5 = rock competence
+- G1 = weathering
+- G2 = alteration
+- G3 = mineralisation
+- G4 = oxidation
+
+```{r}
+#| label: fig-dag-geo1
+#| fig-cap: "Assays -> Rock Bulk Density DAG"
+#| fig.width: 6
+#| fig.height: 4
+dagify(
+  R1 ~ G1 + G2 + G3 + R3,
+  R2 ~ G1,
+  R3 ~ L + G2,
+  R4 ~ L + G1 + G2,
+  R5 ~ G1 + R1 + R3,
+  G4 ~ G1,
+  M ~ L + G1 + G2 + G3 + G4,
+  X ~ M,
+  Y ~ X + M + R1 + R2
+) |> plot_dag(layout="stress")
+```
+
+```{r}
+#| label: fig-dag-geo2
+#| fig-cap: "Assays -> Rock Bulk Density DAG"
+#| fig.width: 6
+#| fig.height: 4
+dagify(
+  M ~ L + G,
+  R ~ L + G,
+  X ~ M,
+  Y ~ X + M + R,
+  S ~ X + G + L,
+  labels = c(
+    M = "Mineral Assemblage",
+    L = "Lithology",
+    G = "Geological Processes",
+    R = "Rock Properties",
+    X = "Assays",
+    Y = "Bulk Density",
+    S = "Domain"
+  )
+) |> plot_dag(layout="stress") +
+  geom_dag_label_repel(
+    aes(label=label),
+    segment.alpha = 1,
+    size = 3,
+    show.legend = FALSE,
+    box.padding = grid::unit(2, "lines"),
+    label.padding = grid::unit(0.2, "lines")
+  )
+```
+
+## Geometallurgy example
+
+```{r}
+offsets_x <- c("1"=1.52,"2"=0.64,"3"=10.66,"4"=0.64,
+               "5"=0.82,"6"=22.9,"7"=1.13)
+sigma_x <- c("1"=1.15,"2"=0.39,"3"=4.52,"4"=0.01,
+             "5"=0.63,"6"=12.57,"7"=0.81)
+node_x <- function(data, parents, betas=NULL) {
+  m <- offsets_x[data$U]
+  z <- rtruncnorm(nrow(data), mean=m, sd=sigma_x[data$U], a=0.001)
+  return(z)
+}
+
+offsets_y <- c("1"=82.65,"2"=63.31,"3"=82.55,"4"=35.08,
+               "5"=48.64,"6"=91.58,"7"=73.04)
+slope_y <- c("1"=0.78,"2"=0.16269347,"3"=0.02,"4"=0.01,
+             "5"=4.44,"6"=-0.14,"7"=0.42)
+sigma_y <- c("1"=3.24,"2"=2.6,"3"=1.99,"4"=0.01,
+             "5"=3.24,"6"=1.9,"7"=2.88)
+node_y <- function(data, parents, betas=NULL) {
+  m <- offsets_y[data$U] + slope_y[data$U]*data$X
+  z <- rtruncnorm(nrow(data), mean=m, sd=sigma_y[data$U], a=0.001)
+  return(z)
+}
+
+dag_geomet <- empty_dag() +
+  node("U", type="rcategorical", probs=c(0.64,0.07,0.02,0.01,0.02,0.01,0.23),
+       output="factor", labels=1:7) +
+  node("Z", type="rnorm", mean=0, sd=1) +
+  node("X", type=node_x, parents="U") +
+  node("Y", type=node_y, parents="U")
+
+# Simulate the Naive Measured Dataset
+set.seed(1700)
+df_geomet <- sim_from_dag(dag_geomet, n_sim=100) |> 
+  as.data.frame() |>
+  mutate(Source = "Measured") |>
+  select(X, Y)
+```
+
+The synthesized recovery on grade is shown in @fig-geomet1.
+
+```{r}
+#| label: fig-geomet1
+#| fig-cap: "Assays -> Rock Bulk Density DAG"
+#| fig.width: 5
+#| fig.height: 5
+
+v <- densCols(df_geomet, colramp=colorRampPalette(c("black", "white")))
+v <- col2rgb(v)[1,] + 1L
+cols <- viridis::viridis(256, alpha=1)
+cols <- cols[v]
+
+plot(df_geomet$X, df_geomet$Y, ylim=c(0,100), col=cols, pch=16, xlim=c(0.01,15),
+     main="Synthesized Geomet data", xlab="Grade (g/t)", ylab="Metal Recovery (%)")
+
+xx <- c(0.001, seq(0.01, 25, by=0.01))
+yy <- 91*(1-exp(-20*xx)) + 0.9*log(xx)
+lines(xx, yy, lty="dashed", col="black")
+yy <- 84*(1-exp(-5*xx)) + 1*log(xx)
+lines(xx, yy, lty="solid", col="black", lwd=2)
+yy <- 75*(1-exp(-0.6*xx)) + 2*log(xx)
+lines(xx, yy, lty="dashed", col="black")
+```
+
+## Crafting a DAG from a list of mineral formula
+
+```{r}
+classify_mineral_group <- function(formula) {
+  case_when(
+    # Native Minerals: single element symbol (e.g., Au, Cu, C, Ag)
+    str_detect(formula, "^[A-Z][a-z]?[0-9]*$") ~ "Native Minerals",
+    
+    # Silicates: contains Silicon (Si)
+    str_detect(formula, "Si") ~ "Silicates",
+    
+    # Carbonates: contains CO3
+    str_detect(formula, "CO3") ~ "Carbonates",
+    
+    # Phosphates: contains PO4 or P with O
+    str_detect(formula, "PO4|P") ~ "Phosphates",
+    
+    # Sulphates: contains SO4 group
+    str_detect(formula, "SO4") ~ "Sulphates",
+    
+    # Sulphides: contains S (without SO4 group)
+    str_detect(formula, "S") ~ "Sulphides",
+    
+    # Halides: contains Halogens (F, Cl, Br, I) without Oxygen
+    str_detect(formula, "F|Cl|Br|I") & !str_detect(formula, "O") ~ "Halides",
+    
+    # Oxides & Hydroxides: contains Oxygen (O/OH) not captured above
+    str_detect(formula, "O|OH") ~ "Oxides",
+    
+    TRUE ~ "Other"
+  )
+}
+
+create_mineral_dag <- function(data) {
+  pattern <- "H2O|CO3|CO2|OH|[A-Z][a-z]?"
+  
+  # Clean names & classify into Mineral Groups
+  processed_df <- data %>%
+    mutate(
+      mineral_clean = str_replace_all(mineral, "[^a-zA-Z0-9_]", "_"),
+      mineral_group = classify_mineral_group(formula)
+    )
+  
+  # Layer 1 Edges (Mineral Group -> Mineral)
+  group_edges <- processed_df %>%
+    distinct(mineral_group, mineral_clean) %>%
+    mutate(
+      group_clean = str_replace_all(mineral_group, "[^a-zA-Z0-9_]", "_"),
+      edge_str = paste0("  ", group_clean, " -> ", mineral_clean)
+    )
+  
+  # Layer 2 Edges (Mineral -> Element / Polyatomic Node)
+  element_edges <- processed_df %>%
+    mutate(nodes = str_extract_all(formula, pattern)) %>%
+    unnest(cols = c(nodes)) %>%
+    distinct(mineral_clean, nodes) %>%
+    mutate(edge_str = paste0("  ", mineral_clean, " -> ", nodes))
+  
+  # Combine Edges into DOT Notation
+  all_edges <- c(group_edges$edge_str, element_edges$edge_str)
+  dot_notation <- paste0("dag {\n", paste(all_edges, collapse = "\n"), "\n}")
+  
+  # Parse into dagitty object
+  dag_obj <- dagitty(dot_notation)
+  
+  return(list(
+    dot = dot_notation,
+    data = processed_df,
+    dag = dag_obj
+  ))
+}
+```
+
+Now for an example.
+
+```{r}
+# Test dataset across all 8 mineral groups
+df <- data.frame(
+  mineral = c("Quartz", "Hematite", "Calcite", "Galena", 
+              "Gypsum", "Halite", "Apatite", "Gold", "Malachite"),
+  formula = c("SiO2", "Fe2O3", "CaCO3", "PbS", 
+              "CaSO4·2H2O", "NaCl", "Ca5(PO4)3F", "Au", "Cu2(OH)2CO3")
+)
+
+result <- create_mineral_dag(df)
+
+# Print generated DOT string
+cat("=== 3-Tier DOT Notation Output ===\n")
+cat(result$dot)
+cat("\n==================================\n\n")
+```
+
+The resulting DAG is shown in @fig-min-dag.
+
+```{r}
+#| label: fig-min-dag
+#| fig-cap: "Example DAG from mineral formula"
+#| fig.width: 8
+#| fig.height: 6
+
+# --- Plot ---
+tidy_dagitty(result$dag, layout="stress") |>
+  ggplot(aes(x=x, y=y, xend=xend, yend=yend)) +
+  geom_dag_edges_link(aes(start_cap=ggraph::circle(2,"mm"),
+                          end_cap=ggraph::circle(2,"mm"))) +
+  geom_dag_label(aes(label=name), 
+                       color="black", 
+                       fill="lightblue",
+                       size=3) +
+  theme_dag() +
+  labs(
+    title = "3-Tier Mineral Relationship DAG",
+    subtitle = "Mineral Group  →  Mineral Species  →  Chemical Node"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "gray30", size = 10)
+  )
+```

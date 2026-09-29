@@ -1,0 +1,146 @@
+# Berkson's paradox (The Collider bias)
+
+Berkson's paradox occurs when a spurious negative association appears between two independent variables because we have conditioned on a common effect (a collider).
+
+## Simulating data from a DAG
+
+```{r}
+#| output: false
+library(simDAG)
+library(bnlearn)
+library(SEMgraph)
+library(ggplot2)
+library(ggdag)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+library(broom)
+```
+
+```{r}
+#| label: fig-bp1
+#| fig-cap: "Berkson's Paradox"
+#| fig.width: 8
+#| fig.height: 4
+
+# Generate data
+n_berk <- 500
+x_b <- rnorm(n_berk, mean=0, sd=1)
+y_b <- rnorm(n_berk, mean=0, sd=1)
+
+# Z is the collider (if X + Y > 0.5)
+z_score <- x_b + y_b + rnorm(n_berk, sd=0.1)
+selected <- ifelse(z_score > 0.5, "Selected", "Not Selected")
+
+berkson_data <- data.frame(X=x_b, Y=y_b, Status=as.factor(selected))
+
+# --- Plots ---
+# Left: The DAG
+dag_berkson <- dagify(Z ~ X, Z ~ Y, exposure="X", outcome="Y") |> 
+  tidy_dagitty() |>
+  ggdag(node_size=12) + 
+  theme_dag() + 
+  labs(title="Berkson's Paradox DAG")
+
+# Right: The Scatter Plot
+plot_berkson <- ggplot(berkson_data, aes(x=X, y=Y)) +
+  geom_point(aes(color=Status), alpha=0.6) +
+  scale_color_manual(values = c("Not Selected" = "grey70", "Selected" = "red")) +
+  geom_smooth(method="lm", se=FALSE, color="black", linetype="dashed", size=1.2) +
+  geom_smooth(data=filter(berkson_data, Status == "Selected"), 
+              method="lm", se=FALSE, color="red", size=1.2) +
+  theme_minimal() +
+  labs(title="Scatter Plot: Y ~ X",
+       subtitle="Dashed line = All Data\nRed line = Selected Data Only (Z = 1)")
+
+# Display side-by-side
+dag_berkson + plot_berkson
+```
+
+### Automatically detecting
+
+```{r}
+# Detect Berkson's Paradox
+# Compares correlation of the whole population vs. a conditioned subset (collider)
+detect_berksons_paradox <- function(data, var1, var2, filter_var, target_condition) {
+  message("\n--- Checking for Berkson's Paradox ---")
+  
+  # Global Correlation
+  global_corr <- cor(data[[var1]], data[[var2]], method="pearson")
+  
+  # Filtered Data (Conditioning on the Collider)
+  filtered_data <- data |> filter(!!sym(filter_var) == target_condition)
+  filtered_corr <- cor(filtered_data[[var1]], filtered_data[[var2]], method="pearson")
+  
+  # Print results
+  print(paste("Global Correlation (Unfiltered Dataset):", round(global_corr, 4)))
+  print(paste("Conditioned Correlation (Filtered Dataset):", round(filtered_corr, 4)))
+  
+  # Paradox Check: If global is near-zero/positive, but conditioned is strongly negative
+  if (global_corr >= -0.1 && filtered_corr < -0.3) {
+    message("⚠️ BERKSON'S PARADOX DETECTED! Filtering data has manufactured an artificial negative correlation.")
+  } else {
+    message("✅ No Berkson's Paradox detected.")
+  }
+}
+```
+
+Example
+
+```{r}
+set.seed(42)
+n_samples <- 1000
+
+# Lithology A: Weathered/Porous Ore (High Iron, Low Bulk Density due to vugs/voids)
+lith_A <- tibble(
+  Lithology    = "Weathered_Ore",
+  Iron_Pct     = rnorm(n_samples / 2, mean = 55, sd = 5),
+  # Within this lithology, higher Fe means slightly higher density
+  Bulk_Density = 2.0 + (0.02 * Iron_Pct) + rnorm(n_samples / 2, sd = 0.1),
+  Gold_g_t     = rnorm(n_samples / 2, mean = 0.8, sd = 0.3),
+  Copper_Pct   = rnorm(n_samples / 2, mean = 0.4, sd = 0.15)
+)
+
+# Lithology B: Fresh BIF (Lower Iron overall, but dense, tight mineral matrix)
+lith_B <- tibble(
+  Lithology    = "Fresh_BIF",
+  Iron_Pct     = rnorm(n_samples / 2, mean = 35, sd = 5),
+  # Within this lithology, higher Fe also means higher density
+  Bulk_Density = 3.2 + (0.02 * Iron_Pct) + rnorm(n_samples / 2, sd = 0.1),
+  Gold_g_t     = rnorm(n_samples / 2, mean = 0.7, sd = 0.3),
+  Copper_Pct   = rnorm(n_samples / 2, mean = 0.35, sd = 0.15)
+)
+
+# Combine
+deposit_df <- bind_rows(lith_A, lith_B) |>
+  mutate(
+    # Engineering Collider: Stockpile Selection Rule
+    # Core is sent to High-Grade stockpile if Cu > 0.6% OR Au > 1.2 g/t
+    In_High_Grade_Stockpile = ifelse(Copper_Pct > 0.6 | Gold_g_t > 1.2, "Yes", "No")
+  )
+
+# Test 2: Copper vs Gold, filtered by Stockpile Selection (Collider)
+detect_berksons_paradox(
+  data = deposit_df, 
+  var1 = "Copper_Pct", 
+  var2 = "Gold_g_t", 
+  filter_var = "In_High_Grade_Stockpile", 
+  target_condition = "Yes"
+)
+```
+
+```{r}
+#| fig-cap: "Example Berksons Paradox"
+#| label: fig-dag
+#| fig-width: 7
+#| fig-height: 4
+
+# Quick Visual Verification
+# Berksons's Visual Validation
+ggplot(deposit_df, aes(x = Copper_Pct, y = Gold_g_t)) +
+  geom_point(aes(color = In_High_Grade_Stockpile), alpha = 0.4) +
+  geom_smooth(method = "lm", color = "black", se = FALSE, linetype = "dashed") + # Global
+  geom_smooth(aes(color = In_High_Grade_Stockpile), method = "lm", se = FALSE) + # Grouped
+  labs(title = "Berksons's Paradox Visualized", subtitle = "Dotted black line = Global, Colored lines = Per-In_High_Grade_Stockpile") +
+  theme_minimal()
+```

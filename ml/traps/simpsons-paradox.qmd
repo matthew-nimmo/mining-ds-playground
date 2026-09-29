@@ -1,0 +1,211 @@
+# Simpson's paradox (The Confounding/Mediation Pivot)
+
+Simpson's paradox occurs when a statistical trend appears in different groups of data but disappears or reverses when these groups are combined.
+
+## Simulating data from a DAG
+
+```{r}
+#| output: false
+library(simDAG)
+library(bnlearn)
+library(SEMgraph)
+library(ggplot2)
+library(ggdag)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+library(broom)
+```
+
+```{r}
+#| label: fig-sp1
+#| fig-cap: "Simpson's Paradox - classic example"
+#| fig.width: 8
+#| fig.height: 4
+
+set.seed(123)
+
+# Generate data
+n <- 300
+z <- sample(1:3, n, replace=TRUE)
+x <- 2 * z + rnorm(n, mean=0, sd=0.5)
+y <- 5 * z - 1.5 * x + rnorm(n, mean=0, sd=0.5)
+simpson_data <- data.frame(X=x, Y=y, Z=as.factor(z))
+
+# --- Plots ---
+# Left: The DAG
+dag_simpson <- dagify(X ~ Z, Y ~ Z, Y ~ X, exposure="X", outcome="Y") |>
+  tidy_dagitty() |>
+  ggdag(node_size=12) + 
+  theme_dag() + 
+  labs(title = "Simpson's Paradox DAG")
+
+# Right: The Scatter Plot
+plot_simpson <- ggplot(simpson_data, aes(x=X, y=Y)) +
+  geom_point(aes(color=Z), alpha=0.7) +
+  geom_smooth(method="lm", se=FALSE, color="black", linetype="dashed", size=1.2) +
+  geom_smooth(aes(color=Z), method="lm", se=FALSE, size=1) +
+  theme_minimal() +
+  labs(title="Scatter Plot: Y ~ X",
+       subtitle="Dashed line = Aggregate (Omitted Z)\nColored lines = Stratified by Z")
+
+# Display side-by-side
+dag_simpson + plot_simpson
+```
+
+```{r}
+#| label: fig-sp2
+#| fig-cap: "Simpson's Paradox - more difficult example"
+#| fig.width: 8
+#| fig.height: 4
+
+set.seed(123)
+
+n_group <- 150
+
+# Group 1: High Z, lower X, steep negative slope
+z1 <- data.frame(
+  X = rnorm(n_group, mean=2, sd=0.8),
+  Z = "Group 1"
+) |> mutate(Y = 3 + 4.5 * X + rnorm(n_group, sd=4.8))
+
+# Group 2: Medium Z, medium X, flat/slight positive slope
+z2 <- data.frame(
+  X = rnorm(n_group, mean=4, sd=0.8),
+  Z = "Group 2"
+) |> mutate(Y = 5 + 0.2 * X + rnorm(n_group, sd=4.8))
+
+# Group 3: Low Z, higher X, moderate positive slope
+z3 <- data.frame(
+  X=rnorm(n_group, mean=6, sd=0.8),
+  Z="Group 3"
+) |> mutate(Y = 0.2 + 0.8 * X + rnorm(n_group, sd=0.8))
+
+# Combine into a single dataset
+simpson_subtle <- rbind(z1, z2, z3)
+
+# --- Plots ---
+# Left: The DAG
+dag_simpson <- dagify(X ~ Z, Y ~ Z, Y ~ X, exposure="X", outcome="Y") |>
+  tidy_dagitty() |>
+  ggdag(node_size=12) + 
+  theme_dag() + 
+  labs(title="Simpson's Paradox DAG")
+
+# Right: The Scatter plot
+plot_simpson <- ggplot(simpson_subtle, aes(x=X, y=Y)) +
+  geom_point(aes(color=Z), alpha=0.4) +
+  scale_color_brewer(palette="Set1") +
+  geom_smooth(method="lm", se=FALSE, color="black", linetype="dashed", size=1.2) +
+  geom_smooth(aes(color=Z), method="lm", se=FALSE, size=1) +
+  theme_minimal() +
+  labs(
+    title="Subtle Simpson's Paradox (Overlapping Groups)",
+    subtitle="Dashed line = Combined Positive Trend\nColored lines = True Group Slopes",
+    color="Confounder (Z)"
+  )
+
+# Display side-by-side
+dag_simpson + plot_simpson
+```
+
+## Automatically detecting
+
+The function `detect_simpsons_paradox` fits a global linear model ($y∼x$) and records the slope sign (+ or −). It then splits the data by your designated confounder and recalculates the slopes. If any subgroup slope sign opposes the global slope sign, it flags the Simpson's paradox.
+
+```{r}
+# Detect Simpson's Paradox
+# Compares global regression slope vs. stratified subgroup regression slopes
+detect_simpsons_paradox <- function(data, x_var, y_var, group_var) {
+  message("\n--- Checking for Simpson's Paradox ---")
+  
+  # Global Model
+  global_formula <- as.formula(paste(y_var, "~", x_var))
+  global_slope <- lm(global_formula, data=data) |> 
+    tidy() |> 
+    filter(term == x_var) |> 
+    pull(estimate)
+  
+  # Grouped Model
+  group_slopes <- data |>
+    nest_by(!!sym(group_var)) |>
+    mutate(model = list(lm(global_formula, data = data))) |>
+    summarise(
+      Group = !!sym(group_var),
+      Slope = tidy(model) |> filter(term == x_var) |> pull(estimate)
+    )
+  
+  # Print results
+  print(paste("Global Linear Slope:", round(global_slope, 4)))
+  print("Slopes by Subgroup:")
+  print(group_slopes)
+  
+  # Paradox Check: Do the subgroup slopes have a different sign than the global slope?
+  paradox_detected <- any(sign(group_slopes$Slope) != sign(global_slope))
+  
+  if (paradox_detected) {
+    message("⚠️ SIMPSON'S PARADOX DETECTED! The global trend contradicts the subgroup trends.")
+  } else {
+    message("✅ No Simpson's Paradox detected. Trends are consistent.")
+  }
+}
+```
+
+Example
+
+```{r}
+set.seed(42)
+n_samples <- 1000
+
+# Lithology A: Weathered/Porous Ore (High Iron, Low Bulk Density due to vugs/voids)
+lith_A <- tibble(
+  Lithology    = "Weathered_Ore",
+  Iron_Pct     = rnorm(n_samples / 2, mean = 55, sd = 5),
+  # Within this lithology, higher Fe means slightly higher density
+  Bulk_Density = 2.0 + (0.02 * Iron_Pct) + rnorm(n_samples / 2, sd = 0.1),
+  Gold_g_t     = rnorm(n_samples / 2, mean = 0.8, sd = 0.3),
+  Copper_Pct   = rnorm(n_samples / 2, mean = 0.4, sd = 0.15)
+)
+
+# Lithology B: Fresh BIF (Lower Iron overall, but dense, tight mineral matrix)
+lith_B <- tibble(
+  Lithology    = "Fresh_BIF",
+  Iron_Pct     = rnorm(n_samples / 2, mean = 35, sd = 5),
+  # Within this lithology, higher Fe also means higher density
+  Bulk_Density = 3.2 + (0.02 * Iron_Pct) + rnorm(n_samples / 2, sd = 0.1),
+  Gold_g_t     = rnorm(n_samples / 2, mean = 0.7, sd = 0.3),
+  Copper_Pct   = rnorm(n_samples / 2, mean = 0.35, sd = 0.15)
+)
+
+# Combine
+deposit_df <- bind_rows(lith_A, lith_B) |>
+  mutate(
+    # Engineering Collider: Stockpile Selection Rule
+    # Core is sent to High-Grade stockpile if Cu > 0.6% OR Au > 1.2 g/t
+    In_High_Grade_Stockpile = ifelse(Copper_Pct > 0.6 | Gold_g_t > 1.2, "Yes", "No")
+  )
+
+# Test 1: Density vs Iron, grouped by Lithology (Confounder)
+detect_simpsons_paradox(
+  data = deposit_df, 
+  x_var = "Iron_Pct", 
+  y_var = "Bulk_Density", 
+  group_var = "Lithology"
+)
+```
+
+```{r}
+#| fig-cap: "Example Simpsons Paradox"
+#| label: fig-dag
+#| fig-width: 7
+#| fig-height: 4
+
+# Quick Visual Verification
+# Simpson's Visual Validation
+ggplot(deposit_df, aes(x = Iron_Pct, y = Bulk_Density)) +
+  geom_point(aes(color = Lithology), alpha = 0.4) +
+  geom_smooth(method = "lm", color = "black", se = FALSE, linetype = "dashed") + # Global
+  geom_smooth(aes(color = Lithology), method = "lm", se = FALSE) + # Grouped
+  labs(title = "Simpson's Paradox Visualized", subtitle = "Dotted black line = Global, Colored lines = Per-Lithology") +
+  theme_minimal()
+```
