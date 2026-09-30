@@ -1,0 +1,476 @@
+---
+title: "Data Understanding"
+subtitle: "Exploratory Visualization"
+author: "Matthew Nimmo"
+date: "2025-01-07"
+---
+
+```{r}
+#| label: setup
+library(viridis)
+library(targets)
+library(grid)
+library(gridExtra)
+library(psych)
+library(mixtools)
+library(viridis)
+library(partykit)
+library(clhs)
+library(ggplot2)
+library(ggthemes)
+library(bnlearn)
+library(dplyr)
+library(ggdag)
+library(SEMgraph)
+library(ClustOfVar)
+library(mclust)
+library(ggforce)
+library(ClusterR)
+
+source("cumprob.R")
+source("panel.R")
+source("my.pal.R")
+source("build_umap.R")
+source("bn_plot.R")
+```
+
+# Data
+
+The Babbitt composite drillhole data from the pygslib Python package.
+
+```{r}
+df <- read.csv("cmp.csv")
+```
+
+# Data exploration
+
+## Univariate distributions of numeric attributes
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+
+par(mar=c(4.1,4.1,1,1))
+cumprob(df$CU, main="", xlab="CU")
+```
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+hist(log(df$CU), xlab="log(CU)", main="", breaks="FD")
+box("outer")
+```
+
+## Relationship between numeric attributes
+
+## Results of subsetting data
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+boxplot(CU ~ Domain, data=df, outline=FALSE)
+box("outer")
+```
+
+```{r}
+x <- df
+x$class <- factor(x$Domain)
+print(anova(lm(CU ~ class, data=x)))
+```
+
+# Exploratory modelling
+
+## Dimension reduction
+
+```{r}
+df_x <- df[, c("CU","xm","ym","zm")]
+df_i <- complete.cases(df_x)
+df_x <- df_x[df_i, ]
+```
+
+```{r}
+um <- build_umap(df_x)
+```
+
+```{r}
+scaled_center <- attr(um$data, "scaled:center")
+scaled_scale <- attr(um$data, "scaled:scale")
+
+x <- scale(df_x, center=scaled_center, scale=scaled_scale) |>
+  as.data.frame()
+x <- predict(um, x) |>
+  as.data.frame(x)
+names(x) <- c("x_umap","y_umap")
+
+df_x <- cbind(df_x, x)
+df_x$Domain <- factor(df[df_i, "Domain"])
+```
+
+```{r}
+#| fig.width: 5
+#| fig.height: 5
+ggplot(data=df_x, mapping=aes(x=x_umap, y=y_umap)) +
+  geom_point() +
+  labs(x=NULL, y=NULL) +
+  coord_fixed() +
+  scale_x_continuous(breaks=NULL) +
+  scale_y_continuous(breaks=NULL) +
+  theme_tufte()
+```
+
+## Bayesian Network models
+
+```{r}
+set.seed(2022)
+dag <- bnlearn::hc(df_x, whitelist=NULL, blacklist=NULL)
+bn <- bn.fit(dag, df_x, replace.unidentifiable=TRUE)
+```
+
+```{r}
+#| fig.width: 5
+#| fig.height: 5
+bn_plot(bn)
+```
+
+## Latent (hidden) variable models
+
+```{r}
+i <- row.names(um$data)
+df_y <- df[i, c("CU","xm","ym","zm","Domain")]
+df_y$Domain <- factor(df_y$Domain)
+names(df_y) <- c("CU","x","y","z","Domain")
+
+z <- um$layout |>
+  as.data.frame()
+names(z) <- c("x_umap","y_umap")
+
+df_y <- cbind(df_y, z)
+```
+
+```{r}
+m <- hclustvar(X.quanti=df_y[, 1:4], X.quali=df_y[, 5, drop=FALSE], init=NULL)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 5
+par(mar=c(1,4,1,1))
+plot(m)
+```
+
+```{r}
+#| eval: false
+#| fig.height: 3
+#| fig.width: 5
+# Check number of latent variables.
+suppressWarnings(fa.parallel(df_y[, 1:4, drop=FALSE], fm="minres", fa="fa"))
+```
+
+```{r}
+#| eval: false
+m <- fa(df_y, nfactors=3, rotate="varimax", fm="minres")
+```
+
+```{r}
+#| eval: false
+#| fig.height: 3
+#| fig.width: 5
+par(oma=c(0,0.5,1,0), xpd=NA)
+fa.diagram(m, marg=c(0,1,1,0), digits=2, adj=1, rsize=0.1)
+```
+
+```{r}
+set.seed(2022)
+m <- Mclust(scale(df_y$CU), G=2)
+table(m$classification)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+par(mar=c(4.1,4.1,1,1))
+x <- df_y
+x$G_ <- m$classification
+boxplot(CU ~ G_, data=x, horizontal=FALSE, outline=FALSE, las=2)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 5
+x <- df_y
+x$G_ <- factor(m$classification)
+par(mar=c(3,3,1,1))
+mosaicplot(table(x$Domain, x$G_), col=viridis(2),off=c(0,0), las=2,
+           main="", xlab="Domain", ylab="G_")
+```
+
+```{r}
+set.seed(2022)
+
+mm <- cluster::pam(um$layout, k=5, metric="euclidean", stand=FALSE)
+mm_grps <- mm$clustering
+mm_ctrs <- mm$medoids
+
+um_z <- as.data.frame(um$layout)
+names(um_z) <- c("x_umap", "y_umap")
+um_z$grp <- mm_grps
+
+y <- as.data.frame(mm_ctrs)
+names(y) <- c("x_umap", "y_umap")
+```
+
+```{r}
+#| fig.height: 5
+#| fig.width: 5
+ggplot(data=um_z, mapping=aes_string(x="x_umap", y="y_umap")) +
+  geom_point(shape=15, size=2, mapping=aes(color=grp), show.legend=FALSE) +
+  geom_voronoi_segment(data=y, color="black", show.legend=FALSE) +
+  scale_color_gradientn(colors=rev(viridis(12))) +
+  labs(x=NULL, y=NULL) +
+  coord_fixed() +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL) +
+  theme_tufte()+
+  theme(legend.key.size = unit(3, 'mm'))
+```
+
+```{r}
+set.seed(2022)
+
+x <- um$layout
+
+k = 8
+m11 <- kmeans(x, centers=k)
+m12 <- cluster::clara(x, k=k, metric="euclidean", stand=FALSE, samples=50)
+m13 <- e1071::cmeans(as.matrix(x), centers=k, dist="euclidean", method="cmeans")
+m14 <- ClusterR::GMM(x, k, "eucl_dist", "random_subset", 10, 10)
+m15 <- meanShiftR::meanShift(as.matrix(x), iterations=30, epsilon=1e-03, epsilonCluster=0.01)
+m16 <- apcluster::apcluster(apcluster::negDistMat(r=2), x, q=0.01)
+m17 <- apcluster::apclusterK(apcluster::negDistMat(r=2), x, K=k)
+m18 <- dbscan::dbscan(x, eps=0.3, minPts=15)
+mm <- list(kmeans=m11, clara=m12, cmeans=m13, gmm=m14,
+           ms=m15, ap=m16, apk=m17, dbs=m18)
+```
+
+```{r}
+#| fig.height: 5
+#| fig.width: 7
+v <- densCols(um$layout, colramp=colorRampPalette(c("black", "white")))
+v <- col2rgb(v)[1,] + 1L
+cex <- 0.2 + v / 256 * 1
+par(mar=c(1, 1, 3.1, 1), mfrow=c(2,4))
+
+for (i in c("kmeans","clara","cmeans","gmm","ms","ap","apk","dbs")) {
+  grps <- switch(i,
+                 kmeans = mm[[i]]$cluster,
+                 clara = mm[[i]]$clustering,
+                 cmeans = mm[[i]]$cluster,
+                 gmm = apply(mm[[i]]$Log_likelihood, 1, which.max),
+                 ms = mm[[i]]$assignment,
+                 ap = apcluster::labels(mm[[i]], "enum"),
+                 apk = apcluster::labels(mm[[i]], "enum"),
+                 dbs = mm[[i]]$cluster)
+  x <- switch(i,
+              kmeans = mm[[i]]$centers,
+              clara = mm[[i]]$medoids,
+              cmeans = mm[[i]]$centers,
+              gmm = mm[[i]]$centroids,
+              ms = NULL,
+              ap = um$layout[mm[[i]]@exemplars, ],
+              ap0 = um$layout[mm[[i]]@exemplars, ],
+              dbs = NULL)
+
+  if (i == "dbs") {
+    cols <- viridis::viridis(length(unique(grps)))[grps+1]
+  } else {
+    cols <- viridis::viridis(length(unique(grps)))[grps]
+  }
+  plot(um$layout, frame.plot=FALSE, pch=15, col=cols, cex=cex, axes=FALSE,
+       xlab="", ylab="", main=i)
+  if (!is.null(x)) {
+    points(x, pch="+", cex=0.7)
+    text(x, labels=1:nrow(x), cex=1, pos=4, offset=0.2, col="black")
+    vt <- deldir::deldir(x[,1], x[,2])
+    plot(vt, wlines="tess", lty="solid", add=TRUE)
+  }
+}
+```
+
+```{r}
+#| eval: false
+#| fig.height: 5
+#| fig.width: 5
+par(mar=c(5.1,4.1,1.1,1.1))
+x <- um$data[,"CU"]
+y <- mm$kmeans$cluster
+boxplot(x ~ y, xlab="kmeans", ylab="grps", horizontal=FALSE, las=2, outline=FALSE)
+```
+
+# Enrich
+
+## Add extra properties
+
+```{r}
+#| fig.width: 5
+#| fig.height: 5
+bn_x <- readRDS("bn.rds")
+bn_plot(bn_x)
+```
+
+```{r}
+set.seed(1132)
+x <- bnlearn::rbn(bn_x, nrow(df_y))
+for (i in names(x)) {
+  if(is.numeric(x[[i]])) {
+    x[[i]] <- as.numeric(rep(NA, nrow(x)))
+  } else {
+    x[[i]] <- factor(rep(NA, nrow(x)), levels=levels(x[[i]]))
+  }
+}
+x$CU <- df_y$CU
+y <- bnlearn::impute(bn_x, x)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+par(mar=c(4.1,4.1,1,1))
+boxplot(CU ~ DOM, data=y, horizontal=TRUE, outline=FALSE, las=2)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+par(mar=c(4.1,4.1,1,1))
+boxplot(AL ~ DOM, data=y, horizontal=TRUE, outline=FALSE, las=2)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+par(mar=c(4.1,4.1,1,1))
+plot(y$CU, y$FE, pch=16, xlim=c(0,3))
+```
+
+```{r}
+df_y <- cbind(df_y, y[, c("FE","S","AS","BA","AL","SG","DOM")])
+```
+
+## Add recovery
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+
+k <- 0.4
+x <- seq(0, 1, by=0.1)
+y <- (1 + exp(-x))^(-k)
+plot(x, y, col="red", lwd=2, type="l")
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+
+k0 <- 3.97896
+b0 <- 1
+x <- seq(0, 1, by=0.05)
+#y <- 2 / (1 + exp(-k0 * b0 * x)) - 1
+y <- 1 / (1 + exp((-k0 - log(x)) / b0))
+plot(x, y, col="red", lwd=2, type="l")
+```
+
+```{r}
+k0 <- 3.97896
+b0 <- 1
+
+df_y$G_ <- factor(m$classification)
+df_y$CU_Rec <- 1 / (1 + exp((-k0 - log(df_y$CU)) / b0))
+
+#nn <- FNN::get.knnx(um_z[,1:2], df_x[, c("x_umap","y_umap")], k=1, algorithm="kd_tree")
+#z <- um_z$grp[nn$nn.index]
+#df_x$grp <- z
+df_y$grp <- um_z$grp
+
+z <- um_z$grp
+zz <- df_y$CU_Rec
+zz <- ifelse(z == 1, 0.961*zz, zz)
+zz <- ifelse(z == 2, 0.973*zz, zz)
+zz <- ifelse(z == 3, 1.032*zz, zz)
+zz <- ifelse(z == 4, 1.073*zz, zz)
+zz <- ifelse(z == 5, 0.866*zz, zz)
+
+z <- df_y$DOM
+zz <- ifelse(z == 1, zz+0.037, zz)
+zz <- ifelse(z == 2, zz+0.123, zz)
+zz <- ifelse(z == 6, zz-0.021, zz)
+zz <- ifelse(z == 7, zz-0.045, zz)
+zz <- ifelse(z == 9, zz-0.222, zz)
+
+z <- 1 - df_y$AL / max(df_y$AL)
+z <- 0.7 + 0.3*z
+zz <- z * zz
+
+z <- 1 - df_y$FE / max(df_y$FE)
+z <- 0.8 + 0.2*z
+zz <- z * zz
+
+z <- 1 - df_y$AS / max(df_y$AS)
+z <- 0.9 + 0.1*z
+zz <- z * zz
+
+z <- df_y$S / max(df_y$S)
+z <- 1 + 0.1*z
+zz <- z * zz
+
+df_y$CU_Rec <- pmax(0.127, pmin(0.999, zz)) * 100
+max(df_y$CU_Rec)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+plot(df_y$CU, df_y$CU_Rec, pch=16, cex=0.5, ylim=c(0,100), xlim=c(0,2))
+```
+
+```{r}
+x <- df_y
+names(x) <- c("CU","x","y","z","Domain","x_umap","y_umap",
+              "FE","S","AS","BA","AL","SG","R_","G_","CU_Rec","grp")
+write.csv(x, file="proto.csv", row.names=FALSE, na="")
+```
+
+```{r}
+set.seed(1)
+y <- df[, c("CU","xm","ym","zm","Domain")]
+names(y) <- c("CU","XC","YC","ZC","Domain")
+y <- y[complete.cases(y), ]
+y <- y[y$CU > 0, ]
+i <- sample.int(nrow(y), 100)
+y <- y[i, ]
+write.csv(y, file="test.csv", row.names=FALSE, na="")
+```
+
+```{r}
+attr(um$data, "scaled:center")
+attr(um$data, "scaled:scale")
+```
+
+```{r}
+xx <- x[, 1:5]
+xx$Domain <- as.numeric(as.character(xx$Domain))
+xx <- sweep(xx, 2, STATS=c(attr(um$data, "scaled:center"), Domain=0.491), FUN="-")
+xx <- sweep(xx, 2, STATS=c(attr(um$data, "scaled:scale"), Domain=0.499969), FUN="/")
+
+yy <- y
+yy$Domain <- as.integer(yy$Domain)
+yy <- sweep(yy, 2, STATS=c(attr(um$data, "scaled:center"), Domain=0.491), FUN="-")
+yy <- sweep(yy, 2, STATS=c(attr(um$data, "scaled:scale"), Domain=0.499969), FUN="/")
+
+i <- FNN::get.knnx(xx, yy, k=5, algorithm="cover_tree")
+i <- i$nn.index
+
+zz <- data.frame(y, x[i[,1], 6:17])
+```
