@@ -1,0 +1,319 @@
+---
+title: PPMT
+author: Matthew Nimmo
+date: "Febuary 2021"
+---
+
+# Packages
+
+```{r}
+# Import the required packages
+packages <- c("rmarkdown","knitr","corrplot","viridis","basicPlotteR")
+for (p in packages) {
+  if(!require(p, character.only=TRUE)) {
+    install.packages(p)
+  }
+  require(p, character.only=TRUE)
+}
+rm(packages, p)
+```
+
+# Helper functions
+
+```{r}
+panel_cor <- function(x, y, digits=2, prefix="", cex.cor=1.6, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(0, 1, 0, 1))
+  r <- cor(x, y, use="complete.obs")
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  text(0.5, 0.5, txt, cex=1.3)
+}
+
+panel_hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot=FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="black")
+}
+```
+
+# PPMT transform functions
+
+```{r}
+# Normal Quantile Transform
+nqt <- function(x, k=30) {
+  require(mgcv)
+
+  y <- qqnorm(x, plot.it=FALSE)$x
+  m1 <- gam(y ~ s(x, bs="cr", k=k))
+
+  y <- predict(m1, newdata=data.frame(x=x))
+  m2 <- gam(x ~ s(y, bs="cr", k=k))
+
+  score <- function(x) {
+    y <- predict(m1, newdata=data.frame(x=x))
+    return(y)
+  }
+
+  iscore <- function(y) {
+    x <- predict(m2, newdata=data.frame(y=y))
+    return(x)
+  }
+
+  return(list(score=score, iscore=iscore))
+}
+```
+
+```{r}
+ppmt <- function(x) {
+  # Zscore 1.
+  #z_norms1 <- lapply(x, nscore)
+  #z_nscore1 <- sapply(1:ncol(x), function(i) z_norms1[[i]]$score)
+  z_nqt1 <- lapply(x, nqt)
+  z_nscore1 <- sapply(1:ncol(x), function(i) z_nqt1[[i]]$score(x[[i]]))
+  z_nscore1 <- as.data.frame(z_nscore1)
+  names(z_nscore1) <- names(x)
+
+  # Sphereing
+  z_cv <- cov(z_nscore1)
+  z_ei <- eigen(z_cv)
+  V <- z_ei$vectors
+  z_W <- V %*% diag(1 / sqrt(z_ei$values)) %*% t(V)
+  z_A <- solve(z_W)
+  z_sphere <- as.matrix(z_nscore1) %*% z_W
+  z_sphere <- as.data.frame(z_sphere)
+  names(z_sphere) <- names(x)
+
+  # Projection pursuit.
+  #z_pp <- fastICA::fastICA(z_nscore1, ncol(x), alg.typ="deflation", fun="logcosh",
+  #                         alpha=1, method="C", row.norm=FALSE, maxit=100,
+  #                         tol=1e-2, verbose=FALSE)
+  require(ica)
+  z_pp <-  icafast(z_sphere, ncol(z_sphere), center=FALSE,
+                   alg="def", fun="logcosh")
+  z_S <- as.data.frame(z_pp$S)
+  names(z_S) <- names(z_sphere)
+
+  # Zscore 2.
+  #z_norms2 <- lapply(z_S, nscore)
+  #z_nscore2 <- sapply(1:ncol(z_S), function(i) z_norms2[[i]]$score)
+  z_nqt2 <- lapply(z_S, nqt)
+  z_nscore2 <- sapply(1:ncol(z_S), function(i) z_nqt2[[i]]$score(z_S[[i]]))
+  z_nscore2 <- as.data.frame(z_nscore2)
+  names(z_nscore2) <- names(x)
+
+  #y <- list(z_norms1=z_norms1, z_sphere=list(W=z_W, A=z_A),
+  #          z_pp=z_pp, z_norms2=z_norms2, X=x, Y=z_nscore2)
+  y <- list(z_nqt1=z_nqt1, z_sphere=list(W=z_W, A=z_A),
+            z_pp=z_pp, z_nqt2=z_nqt2, X=x, Y=z_nscore2)
+
+  return(y)
+}
+
+ippmt <- function(x, ppmt, method=c("back", "interp", "MBCn")) {
+  method <- match.arg(method, c("back", "interp", "MBCn"))
+
+  f.back <- function(x) {
+    # Zscore 2 inverse.
+    #y <- sapply(1:ncol(x), function(i) nsbacktr(x[,i], ppmt$z_norms2[[i]]))
+    y <- sapply(1:ncol(x), function(i) ppmt$z_nqt2[[i]]$iscore(x[,i]))
+
+    # Projection pursuit inverse.
+    #y <- y %*% ppmt$z_pp$A
+    y <- tcrossprod(y, ppmt$z_pp$M)
+
+    # Sphereing inverse.
+    y <- y %*% ppmt$z_sphere$A
+
+    # Zscore 1 inverse.
+    #y <- sapply(1:ncol(y), function(i) nsbacktr(y[,i], ppmt$z_norms1[[i]]))
+    y <- sapply(1:ncol(y), function(i) ppmt$z_nqt1[[i]]$iscore(y[,i]))
+
+    y <- as.data.frame(y)
+    names(y) <- colnames(ppmt$Y)
+
+    return(y)
+  }
+
+  f.interp <- function(x) {
+      require(FNN)
+
+    k <- ncol(x)
+    nn <- get.knnx(df.ppmt$Y, x, k=k, algorithm="kd_tree")
+
+    y <- sapply(1:nrow(x), function(i) {
+      w <- 1 / nn$nn.dist[i,]
+      w <- w / sum(w)
+      y <- t(df.ppmt$X[nn$nn.index[i,],]) %*% w
+      return(y)
+    })
+    y <- as.data.frame(t(y))
+    names(y) <- names(x)
+
+    return(y)
+  }
+
+  f.MBCn <- function(x) {
+    require(MBC)
+    u <- MBCn(as.matrix(df.ppmt$X), as.matrix(df.ppmt$Y), as.matrix(x),
+              iter=30, silent=TRUE, ratio.max=1, trace=0.01)
+
+    return(u$mhat.p)
+  }
+
+  y <- switch(method,
+              back = f.back(x),
+              interp = f.interp(x),
+              MBCn = f.MBCn(x))
+
+  y <- as.data.frame(y)
+  names(y) <- names(x)
+
+  return(y)
+}
+```
+
+```{r}
+panel_points <- function(x, y, ...)
+{
+  i <- complete.cases(cbind(x, y))
+  x <- x[i]
+  y <- y[i]
+
+  z <- densCols(x, y, colramp=colorRampPalette(c("black", "white")))
+  cols <- viridis(256)
+
+  df <- data.frame(x, y)
+  df$dens <- col2rgb(z)[1,] + 1L
+  df$col <- cols[df$dens]
+  df$pch <- 20
+
+  o <- order(df$pch, -df$dens, decreasing=TRUE)
+  df <- df[o,]
+
+  points(y~x, data=df, pch=pch, col=col, cex=1.2)
+}
+```
+
+# Load data
+
+```{r}
+data(jura, package="gstat")
+df <- jura.pred
+df_flds <- c("Cd","Co","Cr","Cu","Ni","Pb","Zn")
+n <- nrow(df)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+#| fig.cap: "Correlation plot of Jura assay data."
+x <- df[, df_flds]
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+#| fig.cap: "Pairs plot of Jura assay data."
+pairs(df[, df_flds], upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+# Perform transform
+
+```{r}
+df_ppmt <- ppmt(df[, df_flds])
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+x <- df_ppmt$Y
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+pairs(df_ppmt$Y, upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+# Perform independent estimation or simulation
+
+```{r}
+set.seed(1)
+n <- 1000
+df_new <- matrix(rnorm(n*length(df_flds)), nrow=n)
+df_new <- as.data.frame(df_new)
+names(df_new) <- df_flds
+```
+
+# Back-transform
+
+```{r}
+df_newt <- ippmt(df_new, df_ppmt, method="back")
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+x <- df_newt
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+pairs(df_newt, upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+# Assess difference in correlation
+
+```{r fig.height=4, fig.width=4}
+#| fig.height: 4
+#| fig.width: 4
+x <- cor(df[, df_flds], use="complete.obs")
+x <- x[lower.tri(x)]
+y <- cor(df_newt, use="complete.obs")
+y <- y[lower.tri(y)]
+flds <- outer(df_flds, df_flds, paste, sep=".")
+flds <- flds[lower.tri(flds)]
+lim <- range(x, y)
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+plot(x, y, pch=16, cex=0.5, xlim=lim, ylim=lim,
+     xlab="Actual", ylab="Simulated")
+abline(0, 1, col="red")
+addTextLabels(x, y, cex.label=0.7, cex.pt=1, col.line="blue",
+              col.label="blue", labels=flds, keepLabelsInside=TRUE)
+```
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+require(MBC)
+u <- MBCp(as.matrix(df_ppmt$X), as.matrix(df_ppmt$Y), as.matrix(df_new),
+          iter=100, silent=TRUE, ratio.max=1, trace=0.01)
+u <- u$mhat.p
+
+x <- cor(df[, df_flds], use="complete.obs")
+x <- x[lower.tri(x)]
+y <- cor(u, use="complete.obs")
+y <- y[lower.tri(y)]
+flds <- outer(df_flds, df_flds, paste, sep=".")
+flds <- flds[lower.tri(flds)]
+lim <- range(x, y)
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+plot(x, y, pch=16, cex=0.5, xlim=lim, ylim=lim,
+     xlab="Actual", ylab="Simulated")
+abline(0, 1, col="red")
+addTextLabels(x, y, cex.label=0.7, cex.pt=1, col.line="blue",
+              col.label="blue", labels=flds, keepLabelsInside=TRUE)
+```

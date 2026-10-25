@@ -1,0 +1,273 @@
+---
+title: PPMT
+author: Matthew Nimmo
+date: "Febuary 2021"
+---
+
+Experiment alternatives to nscore to allow updating of the transform with new data.
+
+# Packages
+
+```{r}
+# Import the required packages
+packages <- c("rmarkdown","knitr","corrplot","basicPlotteR", "MASS", "MBC",
+              "viridis","orthopolynom","ica","fastICA","FNN","plgp")
+for (p in packages) {
+  if(!require(p, character.only=TRUE)) {
+    install.packages(p)
+  }
+  require(p, character.only=TRUE)
+}
+rm(packages, p)
+```
+
+# Helper functions
+
+```{r}
+panel_points <- function(x, y, ...)
+{
+  i <- complete.cases(cbind(x, y))
+  x <- x[i]
+  y <- y[i]
+
+  z <- densCols(x, y, colramp=colorRampPalette(c("black", "white")))
+  cols <- viridis(256)
+
+  df <- data.frame(x, y)
+  df$dens <- col2rgb(z)[1,] + 1L
+  df$col <- cols[df$dens]
+  df$pch <- 20
+
+  o <- order(df$pch, -df$dens, decreasing=TRUE)
+  df <- df[o,]
+
+  points(y~x, data=df, pch=pch, col=col, cex=1.2)
+}
+
+panel_cor <- function(x, y, digits=2, prefix="", cex.cor=1.6, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(0, 1, 0, 1))
+  r <- cor(x, y, use="complete.obs")
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  text(0.5, 0.5, txt, cex=1.3)
+}
+
+panel_hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot=FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="black")
+}
+```
+
+```{r}
+# Normal Quantile Transform
+nqt <- function(x, k=30) {
+  require(mgcv)
+
+  y <- qqnorm(x, plot.it=FALSE)$x
+  m1 <- gam(y ~ s(x, bs="cr", k=k))
+
+  y <- predict(m1, newdata=data.frame(x=x))
+  m2 <- gam(x ~ s(y, bs="cr", k=k))
+
+  score <- function(x) {
+    y <- predict(m1, newdata=data.frame(x=x))
+    return(y)
+  }
+
+  iscore <- function(y) {
+    x <- predict(m2, newdata=data.frame(y=y))
+    return(x)
+  }
+
+  return(list(score=score, iscore=iscore))
+}
+```
+
+# Load data
+
+```{r}
+data(jura, package="gstat")
+df <- jura.pred
+df_flds <- c("Cd","Co","Cr","Cu","Ni","Pb","Zn")
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+#| fig.cap: "Correlation plot of Jura assay data."
+x <- df[, df_flds]
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+#| fig.cap: "Pairs plot of Jura assay data."
+pairs(df[, df_flds], upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+# PPMT stepwise
+
+## Normal score 1
+
+Apply normal score to data.
+
+```{r}
+x <- df[, df_flds]
+
+z_nqt1 <- lapply(x, nqt)
+z_nscore1 <- sapply(1:ncol(x), function(i) z_nqt1[[i]]$score(x[[i]]))
+z_nscore1 <- as.data.frame(z_nscore1)
+names(z_nscore1) <- df_flds
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+pairs(z_nscore1, upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+Check normal score function.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore1)) {
+  plot(x[,i], z_nscore1[,i], pch=16, xlab=df_flds[i], ylab="z")
+}
+```
+
+Check inverse normal score.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+z <- sapply(1:ncol(z_nscore1), function(i) z_nqt1[[i]]$iscore(z_nscore1[[i]]))
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore1)) {
+  plot(x[,i], z[,i], pch=16, xlab=df_flds[i], ylab="z")
+  abline(0, 1, col="red")
+}
+```
+
+## Sphereing
+
+```{r}
+# Sphereing
+z_cv <- cov(z_nscore1)
+z_ei <- eigen(z_cv)
+V <- z_ei$vectors
+z_W <- V %*% diag(1 / sqrt(z_ei$values)) %*% t(V)
+z_A <- solve(z_W)
+z_sphere <- as.matrix(z_nscore1) %*% z_W
+z_sphere <- as.data.frame(z_sphere)
+names(z_sphere) <- df_flds
+```
+
+Check inverse.
+
+```{r}
+y <- as.matrix(z_sphere) %*% z_A
+all.equal(as.numeric(y), as.numeric(as.matrix(z_nscore1)))
+```
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+z <- as.matrix(z_sphere) %*% z_A
+z <- as.data.frame(z)
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore1)) {
+  plot(z_nscore1[,i], z[,i], pch=16, xlab=df_flds[i], ylab="z")
+  abline(0, 1, col="red")
+}
+```
+
+## Projection pursuit
+
+```{r}
+z_pp <-  icafast(z_sphere, ncol(z_sphere), center=FALSE, alg="def", fun="logcosh")
+z_S <- as.data.frame(z_pp$S)
+names(z_S) <- names(z_sphere)
+```
+
+Check inverse projection pursuit.
+
+```{r}
+all.equal(tcrossprod(as.matrix(z_sphere), z_pp$W), z_pp$S)
+all.equal(as.numeric(tcrossprod(as.matrix(z_S), z_pp$M)), as.numeric(as.matrix(z_sphere)))
+```
+
+## Normal score 2
+
+Apply normal score to projection pursuit transform.
+
+```{r}
+z_nqt2 <- lapply(z_S, nqt)
+z_nscore2 <- sapply(1:ncol(z_S), function(i) z_nqt2[[i]]$score(z_S[[i]]))
+z_nscore2 <- as.data.frame(z_nscore2)
+names(z_nscore2) <- df_flds
+```
+
+Check normal score function.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore2)) {
+  plot(z_S[,i], z_nscore2[,i], pch=16, xlab=df_flds[i], ylab="z")
+}
+```
+
+Check inverse normal score.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+z <- sapply(1:ncol(z_nscore2), function(i) z_nqt2[[i]]$iscore(z_nscore2[[i]]))
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore2)) {
+  plot(z_S[,i], z[,i], pch=16, xlab=df_flds[i], ylab="z")
+  abline(0, 1, col="red")
+}
+```
+
+Check full inverse transform
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+
+x <- cor(df[, df_flds], use="complete.obs")
+x <- x[lower.tri(x)]
+
+z <- sapply(1:ncol(z_nscore2), function(i) z_nqt2[[i]]$iscore(z_nscore2[,i]))
+z <- tcrossprod(as.matrix(z), z_pp$M)
+z <- z %*% z_A
+z <- sapply(1:ncol(z_nscore1), function(i) z_nqt1[[i]]$iscore(z[,i]))
+z <- as.data.frame(z)
+names(z) <- df_flds
+
+y <- cor(z, use="complete.obs")
+y <- y[lower.tri(y)]
+flds <- outer(df_flds, df_flds, paste, sep=".")
+flds <- flds[lower.tri(flds)]
+
+lim <- range(x, y)
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+plot(x, y, pch=16, cex=0.5, xlim=lim, ylim=lim,
+     xlab="Actual", ylab="Simulated")
+abline(0, 1, col="red")
+addTextLabels(x, y, cex.label=0.7, cex.pt=1, col.line="blue",
+              col.label="blue", labels=flds, keepLabelsInside=TRUE)
+```

@@ -1,0 +1,311 @@
+---
+title: PPMT
+author: Matthew Nimmo
+date: "Febuary 2021"
+---
+
+Testing the R implementation of the PPMT algorithm.
+
+# Packages
+
+```{r}
+# Import the required packages
+packages <- c("rmarkdown","knitr","corrplot","viridis","basicPlotteR","MBC")
+for (p in packages) {
+  if(!require(p, character.only=TRUE)) {
+    install.packages(p)
+  }
+  require(p, character.only=TRUE)
+}
+rm(packages, p)
+```
+
+# PPMT transform functions
+
+```{r}
+nscore0 <- function(x) {
+  y <- qqnorm(x, plot.it=FALSE)$x
+  trn.table <- data.frame(x=sort(x), score=sort(y))
+  y <- list(score=y, trn.table=trn.table,
+            min=max(0, min(x, na.rm=TRUE)-sd(x, na.rm=TRUE)), max=max(x, na.rm=TRUE)+sd(x, na.rm=TRUE))
+  return (y)
+}
+
+# ltail, utail options:
+#   1 = linear interpolation
+#   2 = power model interpolation
+#   4 = hyperbolic model interpolation (only for upper tail)
+backtr0 <- function(y, x, x.nscore, zmin, zmax,
+                    ltail=1, ltpar=1, utail=1, utpar=1) {
+  powint <- function(xlow, xhigh, ylow, yhigh, xval, pow) {
+    if((xhigh-xlow) < 1.0e-20) {
+      z <- (yhigh + ylow) / 2.0
+    } else {
+      z <- ylow + (yhigh-ylow) * (((xval-xlow)/(xhigh-xlow))^pow)
+    }
+    return(z)
+  }
+
+  nt <- length(x)
+  if(y <= x.nscore[1]) {
+    bktr <- x.nscore[1]
+    cdflo <- pnorm(x.nscore[1])
+    cdfbt <- pnorm(y)
+    if (ltail == 1) {
+      bktr <- powint(0.0, cdflo, zmin, x[1], cdfbt, 1.0)
+    } else if (ltail == 2) {
+      cpow <- 1.0 / ltpar
+      bktr <- powint(0.0, cdflo, zmin, x[1], cdfbt, cpow)
+    }
+  } else if(y >= x.nscore[nt]) {
+    bktr = x[nt]
+    cdfhi  = pnorm(x.nscore[nt])
+    cdfbt  = pnorm(y)
+    if(utail == 1) {
+      bktr = powint(cdfhi, 1.0, x[nt], zmax, cdfbt, 1.0)
+    } else if(utail == 2) {
+      cpow   = 1.0 / utpar
+      bktr = powint(cdfhi, 1.0, x[nt], zmax, cdfbt, cpow)
+    } else if(utail == 4) {
+      lambda <- (x[nt]^utpar) * (1.0 - cdfhi)
+      bktr <- (lambda / (1.0 - cdfbt))^(1.0 / utpar)
+    }
+  } else {
+    j <- findInterval(y, x.nscore)
+    j <- max(min((nt-1), j), 1)
+    bktr <- powint(x.nscore[j], x.nscore[j+1], x[j], x[j+1], y, 1.0)
+  }
+
+  return(bktr)
+}
+
+nsbacktr0 <- function(y, nscore) {
+  sapply(y, backtr0, nscore$trn.table$x, nscore$trn.table$score,
+         nscore$min, nscore$max)
+}
+```
+
+```{r}
+ppmt <- function(x) {
+  require(ica)
+
+  # Normal score.
+  z_norms1 <- lapply(x, nscore0)
+  z_nscore1 <- lapply(z_norms1, function(o) o$score)
+  z_nscore1 <- do.call("cbind", z_nscore1)
+  colnames(z_nscore1) <- names(x)
+
+  # Sphereing.
+  z_cv <- cov(z_nscore1)
+  z_ei <- eigen(z_cv)
+  V <- z_ei$vectors
+  z_W <- V %*% diag(1 / sqrt(z_ei$values)) %*% t(V)
+  z_A <- solve(z_W)
+  z_sphere <- as.matrix(z_nscore1) %*% z_W
+  z_sphere <- as.data.frame(z_sphere)
+  names(z_sphere) <- names(x)
+
+  # Projection pursuit.
+  z_pp <-  icafast(z_sphere, ncol(z_sphere), center=FALSE, alg="def", fun="logcosh")
+  z_S <- as.data.frame(z_pp$S)
+  names(z_S) <- names(z_sphere)
+
+  # Normal score.
+  z_norms2 <- lapply(z_S, nscore0)
+  z_nscore2 <- lapply(z_norms2, function(o) o$score)
+  z_nscore2 <- do.call("cbind", z_nscore2)
+  z_nscore2 <- as.data.frame(z_nscore2)
+  names(z_nscore2) <- names(x)
+
+  y <- list(z_norms1=z_norms1, z_sphere=list(W=z_W, A=z_A),
+            z_pp=z_pp, z_norms2=z_norms2, X=x, Y=z_nscore2)
+
+  return(y)
+}
+
+ippmt <- function(x, ppmt) {
+  z <- sapply(1:ncol(x), function(i) nsbacktr0(x[,i], ppmt$z_norms2[[i]]))
+  z <- tcrossprod(z, ppmt$z_pp$M)
+  z <- z %*% ppmt$z_sphere$A
+  z <- sapply(1:ncol(x), function(i) nsbacktr0(z[,i], ppmt$z_norms1[[i]]))
+  z <- as.data.frame(z)
+  names(z) <- names(x)
+
+  return(z)
+}
+```
+
+```{r}
+panel_points <- function(x, y, ...)
+{
+  i <- complete.cases(cbind(x, y))
+  x <- x[i]
+  y <- y[i]
+
+  z <- densCols(x, y, colramp=colorRampPalette(c("black", "white")))
+  cols <- viridis(256)
+
+  df <- data.frame(x, y)
+  df$dens <- col2rgb(z)[1,] + 1L
+  df$col <- cols[df$dens]
+  df$pch <- 20
+
+  o <- order(df$pch, -df$dens, decreasing=TRUE)
+  df <- df[o,]
+
+  points(y~x, data=df, pch=pch, col=col, cex=1.2)
+}
+
+panel_cor <- function(x, y, digits=2, prefix="", cex.cor=1.6, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(0, 1, 0, 1))
+  r <- cor(x, y, use="complete.obs")
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  text(0.5, 0.5, txt, cex=1.3)
+}
+
+panel_hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot=FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="black")
+}
+```
+
+# Test
+
+## Load data
+
+```{r}
+data(jura, package="gstat")
+df <- jura.pred
+df_flds <- c("Cd","Co","Cr","Cu","Ni","Pb","Zn")
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+#| fig.cap: "Correlation plot of Jura assay data."
+x <- df[, df_flds]
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+#| fig.cap: "Pairs plot of Jura assay data."
+pairs(df[, df_flds], upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+## Perform transform
+
+```{r}
+df_ppmt <- ppmt(df[, df_flds])
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+#| fig.cap: "Correlation plot of PPMT transformed Jura assay data."
+x <- df_ppmt$Y
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+#| fig.cap: "Pairs plot of PPMT transformed Jura assay data."
+pairs(df_ppmt$Y, pch=16, cex=0.5, gap=0.2,
+      upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+## Perform independent estimation or simulation
+
+```{r}
+set.seed(1)
+n <- 1000
+df_new <- matrix(rnorm(n*length(df_flds)), nrow=n)
+#df_new <- MASS::mvrnorm(n, mu=sapply(df_ppmt$Y, mean), Sigma=cov(df_ppmt$Y))
+df_new <- as.data.frame(df_new)
+names(df_new) <- df_flds
+```
+
+## Back-transform
+
+```{r}
+df_newt <- ippmt(df_new, df_ppmt)
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+#| fig.cap: "Correlation plot of simulated data."
+x <- df_newt
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+#| fig.cap: "Pairs plot of simulated data."
+pairs(df_newt, pch=16, cex=0.5, gap=0.2,
+      upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+## Assess difference in correlation
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+#| fig.cap: "Difference in correlation."
+x <- cor(df[, df_flds], use="complete.obs")
+x <- x[lower.tri(x)]
+y <- cor(df_newt, use="complete.obs")
+y <- y[lower.tri(y)]
+flds <- outer(df_flds, df_flds, paste, sep=".")
+flds <- flds[lower.tri(flds)]
+lim <- range(x, y)
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+plot(x, y, pch=16, cex=0.5, xlim=lim, ylim=lim,
+     xlab="Actual", ylab="Simulated")
+abline(0, 1, col="red")
+addTextLabels(x, y, cex.label=0.7, cex.pt=1, col.line="blue",
+              col.label="blue", labels=flds, keepLabelsInside=TRUE)
+```
+
+## Compare PPMT with MBC
+
+Using the Multivariate Bias Correction (MBC) algorithm for back transform.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+#| fig.cap: "Difference in correlation."
+
+u <- MBCp(as.matrix(df_ppmt$X), as.matrix(df_ppmt$Y), as.matrix(df_new),
+          iter=100, silent=TRUE, ratio.max=1, trace=0.01)
+u <- u$mhat.p
+
+x <- cor(df[, df_flds], use="complete.obs")
+x <- x[lower.tri(x)]
+y <- cor(u, use="complete.obs")
+y <- y[lower.tri(y)]
+flds <- outer(df_flds, df_flds, paste, sep=".")
+flds <- flds[lower.tri(flds)]
+lim <- range(x, y)
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+plot(x, y, pch=16, cex=0.5, xlim=lim, ylim=lim,
+     xlab="Actual", ylab="Simulated")
+abline(0, 1, col="red")
+addTextLabels(x, y, cex.label=0.7, cex.pt=1, col.line="blue",
+              col.label="blue", labels=flds, keepLabelsInside=TRUE)
+```
+

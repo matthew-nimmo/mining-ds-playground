@@ -1,0 +1,351 @@
+---
+title: PPMT
+author: Matthew Nimmo
+date: "Febuary 2021"
+---
+
+Initial development of the R version of the PPMT algorithm.
+
+# Packages
+
+```{r}
+# Import the required packages
+packages <- c("rmarkdown","knitr","corrplot","basicPlotteR", "MASS",
+              "viridis","orthopolynom","ica","fastICA","FNN","plgp")
+for (p in packages) {
+  if(!require(p, character.only=TRUE)) {
+    install.packages(p)
+  }
+  require(p, character.only=TRUE)
+}
+rm(packages, p)
+```
+
+# Helper functions
+
+```{r}
+panel_points <- function(x, y, ...)
+{
+  i <- complete.cases(cbind(x, y))
+  x <- x[i]
+  y <- y[i]
+
+  z <- densCols(x, y, colramp=colorRampPalette(c("black", "white")))
+  cols <- viridis(256)
+
+  df <- data.frame(x, y)
+  df$dens <- col2rgb(z)[1,] + 1L
+  df$col <- cols[df$dens]
+  df$pch <- 20
+
+  o <- order(df$pch, -df$dens, decreasing=TRUE)
+  df <- df[o,]
+
+  points(y~x, data=df, pch=pch, col=col, cex=1.2)
+}
+
+panel_cor <- function(x, y, digits=2, prefix="", cex.cor=1.6, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(0, 1, 0, 1))
+  r <- cor(x, y, use="complete.obs")
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  text(0.5, 0.5, txt, cex=1.3)
+}
+
+panel_hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr=usr))
+  par(usr=c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot=FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="black")
+}
+```
+
+```{r}
+nscore0 <- function(x) {
+  y <- qqnorm(x, plot.it=FALSE)$x
+  trn.table <- data.frame(x=sort(x), score=sort(y))
+  y <- list(score=y, trn.table=trn.table,
+            min=max(0, min(x, na.rm=TRUE)-sd(x, na.rm=TRUE)), max=max(x, na.rm=TRUE)+sd(x, na.rm=TRUE))
+  return (y)
+}
+
+# ltail, utail options:
+#   1 = linear interpolation
+#   2 = power model interpolation
+#   4 = hyperbolic model interpolation (only for upper tail)
+backtr0 <- function(y, x, x.nscore, zmin, zmax,
+                    ltail=1, ltpar=1, utail=1, utpar=1) {
+  powint <- function(xlow, xhigh, ylow, yhigh, xval, pow) {
+    if((xhigh-xlow) < 1.0e-20) {
+      z <- (yhigh + ylow) / 2.0
+    } else {
+      z <- ylow + (yhigh-ylow) * (((xval-xlow)/(xhigh-xlow))^pow)
+    }
+    return(z)
+  }
+
+  nt <- length(x)
+  if(y <= x.nscore[1]) {
+    bktr <- x.nscore[1]
+    cdflo <- pnorm(x.nscore[1])
+    cdfbt <- pnorm(y)
+    if (ltail == 1) {
+      bktr <- powint(0.0, cdflo, zmin, x[1], cdfbt, 1.0)
+    } else if (ltail == 2) {
+      cpow <- 1.0 / ltpar
+      bktr <- powint(0.0, cdflo, zmin, x[1], cdfbt, cpow)
+    }
+  } else if(y >= x.nscore[nt]) {
+    bktr = x[nt]
+    cdfhi  = pnorm(x.nscore[nt])
+    cdfbt  = pnorm(y)
+    if(utail == 1) {
+      bktr = powint(cdfhi, 1.0, x[nt], zmax, cdfbt, 1.0)
+    } else if(utail == 2) {
+      cpow   = 1.0 / utpar
+      bktr = powint(cdfhi, 1.0, x[nt], zmax, cdfbt, cpow)
+    } else if(utail == 4) {
+      lambda <- (x[nt]^utpar) * (1.0 - cdfhi)
+      bktr <- (lambda / (1.0 - cdfbt))^(1.0 / utpar)
+    }
+  } else {
+    j <- findInterval(y, x.nscore)
+    j <- max(min((nt-1), j), 1)
+    bktr <- powint(x.nscore[j], x.nscore[j+1], x[j], x[j+1], y, 1.0)
+  }
+
+  return(bktr)
+}
+
+nsbacktr0 <- function(y, nscore) {
+  sapply(y, backtr0, nscore$trn.table$x, nscore$trn.table$score,
+         nscore$min, nscore$max)
+}
+```
+
+# Load data
+
+```{r}
+data(jura, package="gstat")
+df <- jura.pred
+df_flds <- c("Cd","Co","Cr","Cu","Ni","Pb","Zn")
+```
+
+```{r}
+#| fig.height: 3
+#| fig.width: 3
+#| fig.cap: "Correlation plot of Jura assay data."
+x <- df[, df_flds]
+y <- cor(x, use="pairwise.complete.obs")
+corrplot(y, tl.cex=0.7, tl.col="black", insig="blank")
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+#| fig.cap: "Pairs plot of Jura assay data."
+pairs(df[, df_flds], upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+# Normal score
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+
+x <- df$Cd
+z <- nscore0(x)
+
+set.seed(1)
+y <- seq(-5.2, 5.2, by=0.001)
+x <- nsbacktr0(y, nscore=z)
+
+par(mfcol=c(1,2))
+plot(x, y, xlab="Cd", ylab="Score")
+plot(y, x, ylab="Cd", xlab="Score")
+```
+
+# PPMT
+
+## Normal score 1
+
+Apply normal score to data.
+
+```{r}
+x <- df[, df_flds]
+
+z_norms1 <- lapply(x, nscore0)
+z_nscore1 <- lapply(z_norms1, function(o) o$score)
+z_nscore1 <- do.call("cbind", z_nscore1)
+colnames(z_nscore1) <- df_flds
+```
+
+```{r}
+#| fig.height: 6.7
+#| fig.width: 6.7
+pairs(z_nscore1, upper.panel=panel_cor, diag.panel=panel_hist, lower.panel=panel_points)
+```
+
+Check normal score function.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore1)) {
+  plot(x[,i], z_nscore1[,i], pch=16, xlab=df_flds[i], ylab="z")
+}
+```
+
+Check inverse normal score.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+z <- sapply(1:ncol(z_nscore1), function(i) nsbacktr0(z_nscore1[,i], z_norms1[[i]]))
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore1)) {
+  plot(x[,i], z[,i], pch=16, xlab=df_flds[i], ylab="z")
+  abline(0, 1, col="red")
+}
+```
+
+## Sphereing
+
+```{r}
+# Sphereing
+z_cv <- cov(z_nscore1)
+z_ei <- eigen(z_cv)
+V <- z_ei$vectors
+z_W <- V %*% diag(1 / sqrt(z_ei$values)) %*% t(V)
+z_A <- solve(z_W)
+z_sphere <- as.matrix(z_nscore1) %*% z_W
+z_sphere <- as.data.frame(z_sphere)
+names(z_sphere) <- df_flds
+```
+
+Check inverse.
+
+```{r}
+y <- as.matrix(z_sphere) %*% z_A
+all.equal(as.numeric(y), as.numeric(as.matrix(z_nscore1)))
+```
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+z <- as.matrix(z_sphere) %*% z_A
+z <- as.data.frame(z)
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore1)) {
+  plot(z_nscore1[,i], z[,i], pch=16, xlab=df_flds[i], ylab="z")
+  abline(0, 1, col="red")
+}
+```
+
+## Projection pursuit
+
+Apply projection pursuit to normal score.
+
+```{r}
+z_pp <- fastICA(z_sphere, ncol(x), alg.typ="deflation", fun="logcosh",
+                alpha=1, method="C", row.norm=FALSE, maxit=200,
+                tol=1e-4, verbose=FALSE)
+z_S <- as.data.frame(z_pp$S)
+colnames(z_S) <- colnames(z_sphere)
+```
+
+Check inverse projection pursuit.
+
+```{r}
+all.equal(as.numeric(as.matrix(z_sphere)), as.numeric(z_pp$X))
+all.equal(z_pp$X %*% z_pp$K %*% z_pp$W, z_pp$S)
+all.equal(as.numeric(z_pp$S %*% z_pp$A),
+          as.numeric(as.matrix(sweep(z_sphere, 2, apply(z_sphere, 2, mean)))))
+```
+
+The `fastICA` function subtracts the mean of X columns from X. This needs to be added back in order to inverse the transformation.
+
+Apply projection pursuit to normal score.
+
+```{r}
+z_pp <-  icafast(z_sphere, ncol(z_sphere), center=FALSE, alg="def", fun="logcosh")
+z_S <- as.data.frame(z_pp$S)
+names(z_S) <- names(z_sphere)
+```
+
+Check inverse projection pursuit.
+
+```{r}
+all.equal(tcrossprod(as.matrix(z_sphere), z_pp$W), z_pp$S)
+all.equal(as.numeric(tcrossprod(as.matrix(z_S), z_pp$M)), as.numeric(as.matrix(z_sphere)))
+```
+
+## Normal score 2
+
+Apply normal score to projection pursuit transform.
+
+```{r}
+z_norms2 <- lapply(z_S, nscore0)
+z_nscore2 <- lapply(z_norms2, function(o) o$score)
+z_nscore2 <- do.call("cbind", z_nscore2)
+colnames(z_nscore2) <- df_flds
+```
+
+Check normal score function.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore2)) {
+  plot(z_S[,i], z_nscore2[,i], pch=16, xlab=df_flds[i], ylab="z")
+}
+```
+
+Check inverse normal score.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8
+z <- sapply(1:ncol(z_nscore2), function(i) nsbacktr0(z_nscore2[,i], z_norms2[[i]]))
+par(mfcol=c(2,4))
+for (i in 1:ncol(z_nscore2)) {
+  plot(z_S[,i], z[,i], pch=16, xlab=df_flds[i], ylab="z")
+  abline(0, 1, col="red")
+}
+```
+
+Check correlations.
+
+```{r}
+#| fig.height: 4
+#| fig.width: 4
+x <- cor(df[, df_flds], use="complete.obs")
+x <- x[lower.tri(x)]
+
+z <- sapply(1:ncol(z_nscore2), function(i) nsbacktr0(z_nscore2[,i], z_norms2[[i]]))
+z <- tcrossprod(as.matrix(z), z_pp$M)
+z <- z %*% z_A
+z <- sapply(1:ncol(z_nscore1), function(i) nsbacktr0(z_nscore1[,i], z_norms1[[i]]))
+z <- as.data.frame(z)
+names(z) <- df_flds
+
+y <- cor(z, use="complete.obs")
+y <- y[lower.tri(y)]
+flds <- outer(df_flds, df_flds, paste, sep=".")
+flds <- flds[lower.tri(flds)]
+
+lim <- range(x, y)
+par(mar=c(5.1, 4.1, 1.1, 1.1))
+plot(x, y, pch=16, cex=0.5, xlim=lim, ylim=lim,
+     xlab="Actual", ylab="Simulated")
+abline(0, 1, col="red")
+addTextLabels(x, y, cex.label=0.7, cex.pt=1, col.line="blue",
+              col.label="blue", labels=flds, keepLabelsInside=TRUE)
+```
